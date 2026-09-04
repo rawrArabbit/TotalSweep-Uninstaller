@@ -22,13 +22,15 @@ It is especially useful if you prefer using a GUI, are not very comfortable with
 
 ## Install TotalSweep
 
-Download the latest RPM from the **Releases** page.
+Download `TotalSweep-Uninstaller-8.9.13.rpm` from the latest release.
 
-~~~bash
-sudo dnf install ./TotalSweep-Uninstaller-8.9.13.rpm
-~~~
+The command below works if the RPM was downloaded to your `Downloads` folder:
 
-If you want to build TotalSweep yourself, the source is available in this repository.
+```bash
+sudo dnf install "$HOME/Downloads/TotalSweep-Uninstaller-8.9.13.rpm"
+```
+
+If you downloaded the RPM somewhere else, replace the path in the command with the actual location of the downloaded file.
 
 ## How TotalSweep Works
 
