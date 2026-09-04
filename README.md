@@ -1,4 +1,4 @@
-# TotalSweep Uninstaller
+<h1><img src="org.kde.totalsweep.svg" alt="TotalSweep Uninstaller icon" width="48" height="48" align="absmiddle"> TotalSweep Uninstaller</h1>
 
 TotalSweep Uninstaller is a graphical uninstaller made for **Fedora** and is currently built and tested on **Fedora 44 KDE Plasma**.
 
