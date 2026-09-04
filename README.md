@@ -6,6 +6,20 @@ TotalSweep was made to give you an easier way to see what is installed on your s
 
 It is especially useful if you prefer using a GUI, are not very comfortable with the terminal, or are coming from another operating system where you are used to managing your apps visually.
 
+## Screenshots
+
+**Uninstall**
+
+![TotalSweep Uninstall tab](assets/screenshots/uninstall.png)
+
+**Leftovers**
+
+![TotalSweep Leftovers tab](assets/screenshots/leftovers.png)
+
+**Quarantine**
+
+![TotalSweep Quarantine tab](assets/screenshots/quarantine.png)
+
 ## Install TotalSweep
 
 Download the latest RPM from the **Releases** page.
