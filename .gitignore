@@ -1,0 +1,40 @@
+# Build output
+/build/
+/build-*/
+/cmake-build-*/
+/CMakeFiles/
+CMakeCache.txt
+cmake_install.cmake
+install_manifest.txt
+Makefile
+compile_commands.json
+
+# Package/build artifacts
+*.rpm
+*.src.rpm
+*.tar.gz
+*.tar.xz
+*.zip
+
+# Temporary / backup files
+*.bak
+*.backup
+*.orig
+*.rej
+*.tmp
+*.log
+*~
+/core
+/core.*
+
+# IDE / editor metadata
+.vscode/
+.idea/
+*.user
+*.swp
+*.swo
+
+# Local caches
+.cache/
+
+/docs/

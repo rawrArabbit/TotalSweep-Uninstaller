@@ -1,0 +1,10 @@
+[Desktop Entry]
+Name=TotalSweep Uninstaller
+GenericName=Application Uninstaller and Cleanup
+Comment=Uninstall applications, sweep leftovers, and safely quarantine removals
+Exec=totalsweep
+Icon=org.kde.totalsweep
+Terminal=false
+Type=Application
+Categories=System;Utility;
+StartupNotify=true
