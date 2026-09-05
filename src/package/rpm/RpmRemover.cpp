@@ -30,11 +30,6 @@ RemovalResult RpmRemover::remove(const RemovalRequest &request)
     QProcess p;
     p.start("pkexec", {"dnf", "remove", "-y", request.application.id});
 
-    /*
-     * Do not attempt to kill a pkexec child after authorization: pkexec may
-     * already have become the root target process.  Authentication itself is
-     * cancellable; once authorized, wait for the real privileged result.
-     */
     if (!p.waitForFinished(-1)) {
         result.error = QStringLiteral("Could not wait for the privileged RPM removal to finish.");
         return result;

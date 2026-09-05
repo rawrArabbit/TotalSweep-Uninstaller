@@ -69,6 +69,7 @@
 #include <QScrollBar>
 #include <QTableView>
 #include <QThread>
+#include <QTemporaryDir>
 #include <QTimer>
 #include <QTreeWidget>
 #include <QTreeWidgetItem>
@@ -1738,7 +1739,9 @@ public:
             case 1:
                 return app.packageManager;
             case 2:
-                return app.version;
+                return app.version.trimmed().isEmpty()
+                    ? QStringLiteral("Unknown")
+                    : app.version.trimmed();
             case 3:
                 return app.installedSize.isEmpty()
                     ? QStringLiteral("Unknown")
@@ -9340,338 +9343,292 @@ private:
     }
 
 
+    static QString flatpakMetainfoSummary(
+        const QString &appId)
+    {
+        if (appId.trimmed().isEmpty())
+            return {};
+
+        const QStringList locations =
+            runCommand(
+                QStringLiteral("flatpak"),
+                {
+                    QStringLiteral("info"),
+                    QStringLiteral("--show-location"),
+                    appId
+                },
+                10000);
+
+        if (locations.isEmpty())
+            return {};
+
+        const QString deployment =
+            locations.first().trimmed();
+
+        if (deployment.isEmpty())
+            return {};
+
+        const QStringList directories = {
+            deployment +
+                QStringLiteral(
+                    "/files/share/metainfo"),
+            deployment +
+                QStringLiteral(
+                    "/files/share/appdata")
+        };
+
+        QStringList candidates;
+
+        for (const QString &directoryPath :
+             directories) {
+            QDir directory(directoryPath);
+
+            if (!directory.exists())
+                continue;
+
+            const QStringList exactNames = {
+                appId +
+                    QStringLiteral(
+                        ".metainfo.xml"),
+                appId +
+                    QStringLiteral(
+                        ".appdata.xml")
+            };
+
+            for (const QString &name :
+                 exactNames) {
+                const QString candidate =
+                    directory.filePath(name);
+
+                if (QFileInfo::exists(candidate))
+                    candidates.append(candidate);
+            }
+
+            const QStringList discovered =
+                directory.entryList(
+                    {
+                        QStringLiteral(
+                            "*.metainfo.xml"),
+                        QStringLiteral(
+                            "*.appdata.xml")
+                    },
+                    QDir::Files,
+                    QDir::Name);
+
+            for (const QString &name :
+                 discovered) {
+                const QString candidate =
+                    directory.filePath(name);
+
+                if (!candidates.contains(
+                        candidate)) {
+                    candidates.append(
+                        candidate);
+                }
+            }
+        }
+
+        const QRegularExpression summaryExpression(
+            QStringLiteral(
+                R"(<summary(?:\s[^>]*)?>(.*?)</summary>)"),
+            QRegularExpression::CaseInsensitiveOption |
+                QRegularExpression::DotMatchesEverythingOption);
+
+        const QRegularExpression tags(
+            QStringLiteral(
+                R"(<[^>]+>)"));
+
+        for (const QString &candidate :
+             candidates) {
+            QFile file(candidate);
+
+            if (!file.open(
+                    QIODevice::ReadOnly |
+                    QIODevice::Text)) {
+                continue;
+            }
+
+            QString contents =
+                QString::fromUtf8(
+                    file.readAll());
+
+            file.close();
+
+            const QRegularExpressionMatch match =
+                summaryExpression.match(
+                    contents);
+
+            if (!match.hasMatch())
+                continue;
+
+            QString summary =
+                match.captured(1)
+                    .trimmed();
+
+            summary.remove(tags);
+
+            summary.replace(
+                QStringLiteral("&quot;"),
+                QStringLiteral("\""));
+
+            summary.replace(
+                QStringLiteral("&apos;"),
+                QStringLiteral("'"));
+
+            summary.replace(
+                QStringLiteral("&lt;"),
+                QStringLiteral("<"));
+
+            summary.replace(
+                QStringLiteral("&gt;"),
+                QStringLiteral(">"));
+
+            summary.replace(
+                QStringLiteral("&amp;"),
+                QStringLiteral("&"));
+
+            summary =
+                summary.simplified();
+
+            if (!summary.isEmpty())
+                return summary;
+        }
+
+        return {};
+    }
+
+
+    static QMap<QString, QString>
+    installedFlatpakVersions()
+    {
+        QMap<QString, QString> versions;
+
+        const QStringList lines =
+            runCommand(
+                QStringLiteral("flatpak"),
+                {
+                    QStringLiteral("list"),
+                    QStringLiteral("--app"),
+                    QStringLiteral(
+                        "--columns=application,version")
+                },
+                15000);
+
+        for (const QString &line : lines) {
+            const QStringList fields =
+                line.split(QLatin1Char('\t'));
+
+            if (fields.size() < 2)
+                continue;
+
+            const QString id =
+                fields.at(0).trimmed();
+
+            const QString version =
+                fields.at(1).trimmed();
+
+            if (!id.isEmpty() &&
+                !version.isEmpty()) {
+                versions.insert(
+                    id,
+                    version);
+            }
+        }
+
+        return versions;
+    }
+
+
     static void enrichApplicationMetadata(
         QList<ApplicationInfo> &applications)
     {
-        for (ApplicationInfo &app : applications) {
+        const QMap<QString, QString> flatpakVersions =
+            installedFlatpakVersions();
+
+        for (ApplicationInfo &app :
+             applications) {
+
+            if (app.type ==
+                    ApplicationType::Flatpak &&
+                app.version.trimmed().isEmpty()) {
+
+                app.version =
+                    flatpakVersions.value(
+                        app.id.trimmed());
+            }
+
+            if (app.type ==
+                    ApplicationType::Flatpak &&
+                app.description.trimmed().isEmpty()) {
+
+                app.description =
+                    flatpakMetainfoSummary(
+                        app.id.trimmed());
+            }
+
             const QString desktopFile =
                 locateDesktopFile(app);
 
-            QString flatpakId;
-
-            if (!desktopFile.isEmpty()) {
-                app.desktopFile = desktopFile;
-
-                QSettings desktop(
-                    desktopFile,
-                    QSettings::IniFormat);
-
-                desktop.beginGroup(
-                    QStringLiteral("Desktop Entry"));
-
-                const QString displayName =
-                    desktop.value(
-                        QStringLiteral("Name"))
-                        .toString()
-                        .trimmed();
-
-                const QString executable =
-                    desktop.value(
-                        QStringLiteral("Exec"))
-                        .toString()
-                        .trimmed();
-
-                flatpakId =
-                    desktop.value(
-                        QStringLiteral("X-Flatpak"))
-                        .toString()
-                        .trimmed();
-
-                desktop.endGroup();
-
-                if (flatpakId.isEmpty() &&
-                    desktopFile.contains(
-                        QStringLiteral(
-                            "/flatpak/exports/share/applications/"))) {
-
-                    flatpakId =
-                        QFileInfo(desktopFile)
-                            .completeBaseName()
-                            .trimmed();
-                }
-
-                if (!displayName.isEmpty())
-                    app.name = displayName;
-
-                if (!executable.isEmpty())
-                    app.executable = executable;
-            }
-
-            if (app.type == ApplicationType::Unknown) {
-                app.removable = false;
-                continue;
-            }
-
-            if (!isManualLocal(app))
+            if (desktopFile.isEmpty())
                 continue;
 
-            const QString launcherFlatpakScope =
-                flatpakScopeForDesktopFile(
-                    desktopFile);
+            app.desktopFile =
+                desktopFile;
 
-            if (!flatpakId.isEmpty() &&
-                flatpakInstalled(
-                    flatpakId,
-                    launcherFlatpakScope)) {
+            QSettings desktop(
+                desktopFile,
+                QSettings::IniFormat);
 
-                ApplicationInfo canonical;
-                bool foundCanonical = false;
-                QList<ApplicationInfo> matchingFlatpaks;
+            desktop.beginGroup(
+                QStringLiteral(
+                    "Desktop Entry"));
 
-                for (const ApplicationInfo &candidate :
-                     std::as_const(applications)) {
-                    if (candidate.type != ApplicationType::Flatpak ||
-                        candidate.id.compare(
-                            flatpakId,
-                            Qt::CaseInsensitive) != 0) {
-                        continue;
-                    }
+            const QString displayName =
+                desktop.value(
+                    QStringLiteral("Name"))
+                    .toString()
+                    .trimmed();
 
-                    matchingFlatpaks.append(candidate);
+            const QString genericName =
+                desktop.value(
+                    QStringLiteral("GenericName"))
+                    .toString()
+                    .trimmed();
 
-                    if (!launcherFlatpakScope.isEmpty() &&
-                        flatpakScopeForApplication(candidate) ==
-                            launcherFlatpakScope) {
-                        canonical = candidate;
-                        foundCanonical = true;
-                        break;
-                    }
+            const QString description =
+                desktop.value(
+                    QStringLiteral("Comment"))
+                    .toString()
+                    .trimmed();
+
+            const QString executable =
+                desktop.value(
+                    QStringLiteral("Exec"))
+                    .toString()
+                    .trimmed();
+
+            desktop.endGroup();
+
+            if (!displayName.isEmpty())
+                app.name = displayName;
+
+            if (!executable.isEmpty())
+                app.executable = executable;
+
+            if (app.description.trimmed().isEmpty()) {
+                if (!description.isEmpty()) {
+                    app.description =
+                        description;
                 }
-
-                if (!foundCanonical &&
-                    matchingFlatpaks.size() == 1) {
-                    canonical = matchingFlatpaks.first();
-                    foundCanonical = true;
+                else if (!genericName.isEmpty() &&
+                         genericName.compare(
+                             app.name,
+                             Qt::CaseInsensitive) != 0) {
+                    app.description =
+                        genericName;
                 }
-
-                const QString launcher =
-                    app.desktopFile;
-                const QString launcherExec =
-                    app.executable;
-                const QString launcherName =
-                    app.name;
-
-                if (foundCanonical)
-                    app = canonical;
-                else {
-                    app.type =
-                        ApplicationType::Flatpak;
-                    app.id = flatpakId;
-                    app.packageManager =
-                        QStringLiteral("Flatpak");
-                    if (!launcherFlatpakScope.isEmpty())
-                        app.source = launcherFlatpakScope;
-                    app.installed = true;
-                    app.removable =
-                        !app.protectedComponent;
-                }
-
-                if (app.desktopFile.isEmpty())
-                    app.desktopFile = launcher;
-                if (app.executable.isEmpty())
-                    app.executable = launcherExec;
-                if ((app.name.isEmpty() || app.name == app.id) &&
-                    !launcherName.isEmpty())
-                    app.name = launcherName;
-
-                const QString userPath =
-                    QDir::homePath() +
-                    QStringLiteral("/.local/share/flatpak/app/") +
-                    flatpakId;
-                const QString systemPath =
-                    QStringLiteral("/var/lib/flatpak/app/") +
-                    flatpakId;
-
-                if (app.installLocation.isEmpty()) {
-                    if (launcherFlatpakScope == QStringLiteral("user") &&
-                        QFileInfo::exists(userPath)) {
-                        app.installLocation = userPath;
-                    }
-                    else if (launcherFlatpakScope == QStringLiteral("system") &&
-                             QFileInfo::exists(systemPath)) {
-                        app.installLocation = systemPath;
-                    }
-                    else if (QFileInfo::exists(userPath) &&
-                             !QFileInfo::exists(systemPath)) {
-                        app.installLocation = userPath;
-                    }
-                    else if (QFileInfo::exists(systemPath) &&
-                             !QFileInfo::exists(userPath)) {
-                        app.installLocation = systemPath;
-                    }
-                }
-
-                continue;
-            }
-
-            QString rpmOwner;
-            QStringList packageEvidence;
-            packageEvidence.append(app.installLocation);
-            packageEvidence.append(app.installLocations);
-            packageEvidence.append(
-                launchPathCandidates(app.executable));
-            packageEvidence.append(app.desktopFile);
-            packageEvidence.removeAll(QString());
-            packageEvidence.removeDuplicates();
-
-            for (const QString &path : packageEvidence) {
-                const QString cleaned =
-                    QDir::cleanPath(path.trimmed());
-
-                const QSet<QString> broadPackageEvidence = {
-                    QStringLiteral("/"),
-                    QStringLiteral("/usr"),
-                    QStringLiteral("/usr/local"),
-                    QStringLiteral("/usr/bin"),
-                    QStringLiteral("/usr/sbin"),
-                    QStringLiteral("/usr/share"),
-                    QStringLiteral("/opt"),
-                    QDir::cleanPath(QDir::homePath())
-                };
-
-                if (cleaned.isEmpty() ||
-                    broadPackageEvidence.contains(cleaned)) {
-                    continue;
-                }
-
-                QFileInfo evidenceInfo(cleaned);
-                if ((!evidenceInfo.exists() &&
-                     !evidenceInfo.isSymLink()) ||
-                    (evidenceInfo.isDir() &&
-                     !pathLooksRelatedToApplication(
-                         app,
-                         cleaned))) {
-                    continue;
-                }
-
-                rpmOwner = rpmOwnerForPath(cleaned);
-                if (!rpmOwner.isEmpty())
-                    break;
-            }
-
-            if (!rpmOwner.isEmpty()) {
-                ApplicationInfo canonical;
-                bool foundCanonical = false;
-
-                for (const ApplicationInfo &candidate :
-                     std::as_const(applications)) {
-                    if (candidate.type == ApplicationType::RPM &&
-                        candidate.id.compare(
-                            rpmOwner,
-                            Qt::CaseInsensitive) == 0) {
-                        canonical = candidate;
-                        foundCanonical = true;
-                        break;
-                    }
-                }
-
-                if (foundCanonical) {
-                    const QString launcher =
-                        app.desktopFile;
-                    const QString launcherExec =
-                        app.executable;
-                    const QString launcherName =
-                        app.name;
-
-                    app = canonical;
-
-                    if (app.desktopFile.isEmpty())
-                        app.desktopFile = launcher;
-                    if (app.executable.isEmpty())
-                        app.executable = launcherExec;
-                    if ((app.name.isEmpty() || app.name == app.id) &&
-                        !launcherName.isEmpty())
-                        app.name = launcherName;
-                }
-                else {
-                    app.removable = false;
-                    app.packageManager =
-                        QStringLiteral("RPM-managed — review");
-                }
-
-                continue;
-            }
-
-            const ManualRemovalPlan plan =
-                resolveManualRemovalPlan(
-                    app,
-                    app.removable);
-
-            if (plan.resolved()) {
-                app.installLocation =
-                    plan.primary;
-                app.removable =
-                    !app.protectedComponent;
-
-                QStringList locations =
-                    app.installLocations;
-                locations.append(plan.paths);
-                locations.removeAll(QString());
-                locations.removeDuplicates();
-                app.installLocations =
-                    locations;
-            }
-            else if (app.removable) {
-                app.removable = false;
             }
         }
-
-        QMap<QString, int> seen;
-        QList<ApplicationInfo> unique;
-
-        for (const ApplicationInfo &app :
-             std::as_const(applications)) {
-
-            QString key;
-            if (app.type == ApplicationType::RPM) {
-                key = QStringLiteral("rpm:") +
-                    app.id.trimmed().toLower();
-            }
-            else if (app.type == ApplicationType::Flatpak) {
-                const QString scope =
-                    flatpakScopeForApplication(app);
-
-                if (!scope.isEmpty()) {
-                    key = QStringLiteral("flatpak:") +
-                        app.id.trimmed().toLower() +
-                        QLatin1Char(':') +
-                        scope;
-                }
-            }
-
-            if (key.isEmpty() ||
-                !seen.contains(key)) {
-
-                seen.insert(key, unique.size());
-                unique.append(app);
-                continue;
-            }
-
-            ApplicationInfo &existing =
-                unique[seen.value(key)];
-
-            if (existing.desktopFile.isEmpty() &&
-                !app.desktopFile.isEmpty())
-                existing.desktopFile = app.desktopFile;
-
-            if (existing.executable.isEmpty() &&
-                !app.executable.isEmpty())
-                existing.executable = app.executable;
-
-            if ((existing.name.isEmpty() ||
-                 existing.name == existing.id) &&
-                !app.name.isEmpty())
-                existing.name = app.name;
-
-            QStringList locations =
-                existing.installLocations;
-            locations.append(app.installLocations);
-            locations.removeAll(QString());
-            locations.removeDuplicates();
-            existing.installLocations = locations;
-        }
-
-        applications = std::move(unique);
     }
 
 
@@ -9975,6 +9932,3291 @@ void showFullApplicationList(
 
 
 
+    static quint64 manualDirectorySize(
+        const QString &root)
+    {
+        const QFileInfo rootInfo(root);
+
+        if (!rootInfo.exists())
+            return 0;
+
+        if (rootInfo.isFile())
+            return static_cast<quint64>(
+                rootInfo.size());
+
+        quint64 total = 0;
+
+        QDirIterator iterator(
+            root,
+            QDir::Files |
+                QDir::Hidden |
+                QDir::System |
+                QDir::NoDotAndDotDot,
+            QDirIterator::Subdirectories);
+
+        while (iterator.hasNext()) {
+            iterator.next();
+
+            const QFileInfo info =
+                iterator.fileInfo();
+
+            if (info.isSymLink())
+                continue;
+
+            const qint64 size =
+                info.size();
+
+            if (size > 0)
+                total +=
+                    static_cast<quint64>(
+                        size);
+        }
+
+        return total;
+    }
+
+
+    static QString manualSizeText(
+        quint64 bytes)
+    {
+        if (bytes < 1024)
+            return QStringLiteral("%1 B")
+                .arg(bytes);
+
+        static const char *units[] = {
+            "KiB",
+            "MiB",
+            "GiB",
+            "TiB"
+        };
+
+        double value =
+            static_cast<double>(bytes);
+
+        int unit = -1;
+
+        do {
+            value /= 1024.0;
+            ++unit;
+        }
+        while (value >= 1024.0 &&
+               unit < 3);
+
+        const int precision =
+            value >= 100.0
+                ? 0
+                : value >= 10.0
+                    ? 1
+                    : 2;
+
+        return QStringLiteral("%1 %2")
+            .arg(
+                QString::number(
+                    value,
+                    'f',
+                    precision),
+                QString::fromLatin1(
+                    units[unit]));
+    }
+
+
+    static QString manualPythonPackageVersion(
+        const QString &installRoot,
+        const QString &packageId)
+    {
+        const QStringList pythonCandidates = {
+            installRoot +
+                QStringLiteral("/venv/bin/python3"),
+            installRoot +
+                QStringLiteral("/venv/bin/python")
+        };
+
+        QString python;
+
+        for (const QString &candidate :
+             pythonCandidates) {
+            const QFileInfo info(candidate);
+
+            if (info.isFile() &&
+                info.isExecutable()) {
+                python = candidate;
+                break;
+            }
+        }
+
+        if (python.isEmpty())
+            return {};
+
+        QStringList packageNames = {
+            packageId.trimmed(),
+            QFileInfo(installRoot)
+                .fileName()
+                .trimmed()
+        };
+
+        packageNames.removeAll(QString());
+        packageNames.removeDuplicates();
+
+        for (const QString &packageName :
+             packageNames) {
+            QProcess process;
+
+            process.start(
+                python,
+                {
+                    QStringLiteral("-m"),
+                    QStringLiteral("pip"),
+                    QStringLiteral("show"),
+                    packageName
+                });
+
+            if (!process.waitForFinished(8000)) {
+                process.kill();
+                process.waitForFinished();
+                continue;
+            }
+
+            if (process.exitStatus() !=
+                    QProcess::NormalExit ||
+                process.exitCode() != 0) {
+                continue;
+            }
+
+            const QString output =
+                QString::fromUtf8(
+                    process.readAllStandardOutput());
+
+            const QStringList lines =
+                output.split(
+                    QLatin1Char('\n'));
+
+            for (const QString &line :
+                 lines) {
+                if (!line.startsWith(
+                        QStringLiteral("Version:"),
+                        Qt::CaseInsensitive)) {
+                    continue;
+                }
+
+                const QString version =
+                    line.mid(
+                        line.indexOf(
+                            QLatin1Char(':')) + 1)
+                        .trimmed();
+
+                if (!version.isEmpty())
+                    return version;
+            }
+        }
+
+        return {};
+    }
+
+
+    static bool isAppImageFile(
+        const QString &path)
+    {
+        const QFileInfo info(path);
+
+        if (!info.isFile())
+            return false;
+
+        QFile file(path);
+
+        if (!file.open(QIODevice::ReadOnly))
+            return false;
+
+        const QByteArray header =
+            file.read(11);
+
+        if (header.size() < 11)
+            return false;
+
+        const QByteArray magic =
+            header.mid(8, 3);
+
+        return magic ==
+                QByteArray::fromHex("414901") ||
+            magic ==
+                QByteArray::fromHex("414902");
+    }
+
+
+    static QString desktopExecutablePath(
+        const QString &exec,
+        const QString &tryExec)
+    {
+        auto usablePath = [](
+            QString candidate) -> QString {
+            candidate =
+                candidate.trimmed();
+
+            if (candidate.startsWith(
+                    QStringLiteral("file://"))) {
+                candidate =
+                    candidate.mid(7);
+            }
+
+            if (!QDir::isAbsolutePath(
+                    candidate)) {
+                return {};
+            }
+
+            const QFileInfo info(candidate);
+
+            if (!info.isFile())
+                return {};
+
+            const QString canonical =
+                info.canonicalFilePath();
+
+            return canonical.isEmpty()
+                ? info.absoluteFilePath()
+                : canonical;
+        };
+
+        const QString tryPath =
+            usablePath(tryExec);
+
+        if (!tryPath.isEmpty())
+            return tryPath;
+
+        const QStringList parts =
+            QProcess::splitCommand(
+                exec.trimmed());
+
+        const QRegularExpression assignment(
+            QStringLiteral(
+                R"(^[A-Za-z_][A-Za-z0-9_]*=.*$)"));
+
+        for (QString part : parts) {
+            part = part.trimmed();
+
+            if (part.isEmpty() ||
+                part == QStringLiteral("env") ||
+                part.startsWith(
+                    QLatin1Char('%')) ||
+                assignment.match(part)
+                    .hasMatch()) {
+                continue;
+            }
+
+            const QString candidate =
+                usablePath(part);
+
+            if (!candidate.isEmpty())
+                return candidate;
+        }
+
+        return {};
+    }
+
+
+    static QString appImagePathFor(
+        const ApplicationInfo &app)
+    {
+        const QString location =
+            app.installLocation.trimmed();
+
+        if (!location.isEmpty() &&
+            isAppImageFile(location)) {
+            return QFileInfo(location)
+                .canonicalFilePath();
+        }
+
+        const QStringList execParts =
+            QProcess::splitCommand(
+                app.executable.trimmed());
+
+        for (QString part :
+             execParts) {
+            part = part.trimmed();
+
+            if (part.startsWith(
+                    QStringLiteral("file://"))) {
+                part = part.mid(7);
+            }
+
+            if (isAppImageFile(part)) {
+                const QString canonical =
+                    QFileInfo(part)
+                        .canonicalFilePath();
+
+                return canonical.isEmpty()
+                    ? QFileInfo(part)
+                        .absoluteFilePath()
+                    : canonical;
+            }
+        }
+
+        for (const QString &candidate :
+             app.files) {
+            if (!isAppImageFile(candidate))
+                continue;
+
+            const QString canonical =
+                QFileInfo(candidate)
+                    .canonicalFilePath();
+
+            return canonical.isEmpty()
+                ? QFileInfo(candidate)
+                    .absoluteFilePath()
+                : canonical;
+        }
+
+        return {};
+    }
+
+
+    static QList<ApplicationInfo>
+    detectDesktopAppImages(
+        const QList<ApplicationInfo> &existing)
+    {
+        QList<ApplicationInfo> result;
+        QSet<QString> knownDesktopFiles;
+
+        for (const ApplicationInfo &app :
+             existing) {
+            if (!app.desktopFile
+                     .trimmed()
+                     .isEmpty()) {
+                knownDesktopFiles.insert(
+                    QDir::cleanPath(
+                        app.desktopFile));
+            }
+        }
+
+        const QStringList directories = {
+            QDir::homePath() +
+                QStringLiteral(
+                    "/.local/share/applications"),
+            QStringLiteral(
+                "/usr/local/share/applications"),
+            QStringLiteral(
+                "/usr/share/applications")
+        };
+
+        for (const QString &directoryPath :
+             directories) {
+            QDir directory(directoryPath);
+
+            if (!directory.exists())
+                continue;
+
+            const QFileInfoList entries =
+                directory.entryInfoList(
+                    {
+                        QStringLiteral(
+                            "*.desktop")
+                    },
+                    QDir::Files |
+                        QDir::Readable |
+                        QDir::NoDotAndDotDot,
+                    QDir::Name);
+
+            for (const QFileInfo &entry :
+                 entries) {
+                QSettings desktop(
+                    entry.absoluteFilePath(),
+                    QSettings::IniFormat);
+
+                desktop.beginGroup(
+                    QStringLiteral(
+                        "Desktop Entry"));
+
+                const QString type =
+                    desktop.value(
+                        QStringLiteral("Type"))
+                        .toString()
+                        .trimmed();
+
+                const bool hidden =
+                    desktop.value(
+                        QStringLiteral("Hidden"),
+                        false)
+                        .toBool();
+
+                const QString name =
+                    desktop.value(
+                        QStringLiteral("Name"))
+                        .toString()
+                        .trimmed();
+
+                const QString genericName =
+                    desktop.value(
+                        QStringLiteral("GenericName"))
+                        .toString()
+                        .trimmed();
+
+                const QString comment =
+                    desktop.value(
+                        QStringLiteral("Comment"))
+                        .toString()
+                        .trimmed();
+
+                const QString exec =
+                    desktop.value(
+                        QStringLiteral("Exec"))
+                        .toString()
+                        .trimmed();
+
+                const QString tryExec =
+                    desktop.value(
+                        QStringLiteral("TryExec"))
+                        .toString()
+                        .trimmed();
+
+                const QString appImageVersion =
+                    desktop.value(
+                        QStringLiteral(
+                            "X-AppImage-Version"))
+                        .toString()
+                        .trimmed();
+
+                const QString appImageName =
+                    desktop.value(
+                        QStringLiteral(
+                            "X-AppImage-Name"))
+                        .toString()
+                        .trimmed();
+
+                const QString flatpakId =
+                    desktop.value(
+                        QStringLiteral("X-Flatpak"))
+                        .toString()
+                        .trimmed();
+
+                desktop.endGroup();
+
+                if (hidden ||
+                    !flatpakId.isEmpty() ||
+                    (!type.isEmpty() &&
+                     type !=
+                         QStringLiteral(
+                             "Application"))) {
+                    continue;
+                }
+
+                const QString executable =
+                    desktopExecutablePath(
+                        exec,
+                        tryExec);
+
+                if (executable.isEmpty() ||
+                    !isAppImageFile(
+                        executable)) {
+                    continue;
+                }
+
+                const QStringList rpmOwner =
+                    runCommand(
+                        QStringLiteral("rpm"),
+                        {
+                            QStringLiteral("-qf"),
+                            executable
+                        },
+                        5000);
+
+                if (!rpmOwner.isEmpty())
+                    continue;
+
+                ApplicationInfo app;
+
+                app.name =
+                    !name.isEmpty()
+                        ? name
+                        : (!appImageName.isEmpty()
+                               ? appImageName
+                               : QFileInfo(executable)
+                                     .completeBaseName());
+
+                app.id =
+                    entry.completeBaseName();
+
+                app.version =
+                    appImageVersion;
+
+                if (!comment.isEmpty()) {
+                    app.description =
+                        comment;
+                }
+                else if (!genericName.isEmpty() &&
+                         genericName.compare(
+                             app.name,
+                             Qt::CaseInsensitive) != 0) {
+                    app.description =
+                        genericName;
+                }
+
+                const QFileInfo imageInfo(
+                    executable);
+
+                app.installedSize =
+                    manualSizeText(
+                        static_cast<quint64>(
+                            imageInfo.size()));
+
+                QDateTime installTime =
+                    imageInfo.birthTime();
+
+                if (!installTime.isValid())
+                    installTime =
+                        imageInfo.lastModified();
+
+                if (installTime.isValid()) {
+                    app.installDate =
+                        installTime.date()
+                            .toString(
+                                Qt::ISODate);
+
+                    app.installDateEstimated =
+                        true;
+                }
+
+                app.executable =
+                    executable;
+
+                app.desktopFile =
+                    entry.absoluteFilePath();
+
+                app.installLocation =
+                    executable;
+
+                app.installLocations = {
+                    executable
+                };
+
+                app.files = {
+                    executable,
+                    entry.absoluteFilePath()
+                };
+
+                app.packageManager =
+                    QStringLiteral("AppImage");
+
+                app.source =
+                    QStringLiteral("AppImage");
+
+                app.type =
+                    ApplicationType::AppImage;
+
+                app.risk =
+                    RiskLevel::Unknown;
+
+                app.installed = true;
+                app.removable = true;
+                app.userInstalled = true;
+                app.systemComponent = false;
+                app.protectedComponent = false;
+
+                result.append(app);
+            }
+        }
+
+        return result;
+    }
+
+
+    static QList<ApplicationInfo>
+    detectStandaloneAppImages(
+        const QList<ApplicationInfo> &existing)
+    {
+        QList<ApplicationInfo> result;
+        QSet<QString> knownPaths;
+
+        for (const ApplicationInfo &app :
+             existing) {
+            const QString candidate =
+                appImagePathFor(app);
+
+            if (!candidate.isEmpty())
+                knownPaths.insert(candidate);
+        }
+
+        const QStringList directories = {
+            QDir::homePath() +
+                QStringLiteral(
+                    "/Applications"),
+            QDir::homePath() +
+                QStringLiteral(
+                    "/AppImages"),
+            QDir::homePath() +
+                QStringLiteral(
+                    "/.local/share/AppImages"),
+            QDir::homePath() +
+                QStringLiteral(
+                    "/.local/bin")
+        };
+
+        for (const QString &directoryPath :
+             directories) {
+            QDir directory(directoryPath);
+
+            if (!directory.exists())
+                continue;
+
+            const QFileInfoList entries =
+                directory.entryInfoList(
+                    QDir::Files |
+                        QDir::Readable |
+                        QDir::NoDotAndDotDot,
+                    QDir::Name);
+
+            for (const QFileInfo &entry :
+                 entries) {
+                const QString path =
+                    entry.absoluteFilePath();
+
+                if (!entry.isExecutable() ||
+                    !isAppImageFile(path)) {
+                    continue;
+                }
+
+                QString canonical =
+                    entry.canonicalFilePath();
+
+                if (canonical.isEmpty())
+                    canonical = path;
+
+                if (knownPaths.contains(
+                        canonical)) {
+                    continue;
+                }
+
+                ApplicationInfo app;
+
+                app.name =
+                    entry.completeBaseName();
+
+                app.id =
+                    entry.fileName();
+
+                app.installedSize =
+                    manualSizeText(
+                        static_cast<quint64>(
+                            entry.size()));
+
+                QDateTime installTime =
+                    entry.birthTime();
+
+                if (!installTime.isValid())
+                    installTime =
+                        entry.lastModified();
+
+                if (installTime.isValid()) {
+                    app.installDate =
+                        installTime.date()
+                            .toString(
+                                Qt::ISODate);
+
+                    app.installDateEstimated =
+                        true;
+                }
+
+                app.executable =
+                    canonical;
+
+                app.installLocation =
+                    canonical;
+
+                app.installLocations = {
+                    canonical
+                };
+
+                app.files = {
+                    canonical
+                };
+
+                app.packageManager =
+                    QStringLiteral("AppImage");
+
+                app.source =
+                    QStringLiteral("AppImage");
+
+                app.type =
+                    ApplicationType::AppImage;
+
+                app.risk =
+                    RiskLevel::Unknown;
+
+                app.installed = true;
+                app.removable = true;
+                app.userInstalled = true;
+                app.systemComponent = false;
+                app.protectedComponent = false;
+
+                result.append(app);
+                knownPaths.insert(
+                    canonical);
+            }
+        }
+
+        return result;
+    }
+
+
+    static int appImageMetadataScore(
+        const ApplicationInfo &app)
+    {
+        int score = 0;
+
+        if (!app.version
+                 .trimmed()
+                 .isEmpty()) {
+            score += 100;
+        }
+
+        if (!app.description
+                 .trimmed()
+                 .isEmpty()) {
+            score += 100;
+        }
+
+        if (!app.desktopFile
+                 .trimmed()
+                 .isEmpty()) {
+            score += 50;
+        }
+
+        if (!app.name
+                 .trimmed()
+                 .isEmpty()) {
+            score += 20;
+        }
+
+        return score;
+    }
+
+
+    static void collapseAppImageApplications(
+        QList<ApplicationInfo> &applications)
+    {
+        QMap<QString, QList<ApplicationInfo>> groups;
+        QList<ApplicationInfo> unchanged;
+
+        for (const ApplicationInfo &app :
+             applications) {
+            if (app.type !=
+                    ApplicationType::AppImage) {
+                unchanged.append(app);
+                continue;
+            }
+
+            const QString path =
+                appImagePathFor(app);
+
+            if (path.isEmpty()) {
+                unchanged.append(app);
+                continue;
+            }
+
+            groups[path].append(app);
+        }
+
+        for (auto it =
+                 groups.cbegin();
+             it != groups.cend();
+             ++it) {
+            const QString path =
+                it.key();
+
+            const QList<ApplicationInfo> members =
+                it.value();
+
+            if (members.isEmpty())
+                continue;
+
+            int bestIndex = 0;
+            int bestScore =
+                appImageMetadataScore(
+                    members.first());
+
+            for (int i = 1;
+                 i < members.size();
+                 ++i) {
+                const int score =
+                    appImageMetadataScore(
+                        members.at(i));
+
+                if (score > bestScore) {
+                    bestScore = score;
+                    bestIndex = i;
+                }
+            }
+
+            ApplicationInfo merged =
+                members.at(bestIndex);
+
+            QStringList files;
+
+            for (const ApplicationInfo &member :
+                 members) {
+                if (merged.version
+                        .trimmed()
+                        .isEmpty() &&
+                    !member.version
+                         .trimmed()
+                         .isEmpty()) {
+                    merged.version =
+                        member.version.trimmed();
+                }
+
+                if (merged.description
+                        .trimmed()
+                        .isEmpty() &&
+                    !member.description
+                         .trimmed()
+                         .isEmpty()) {
+                    merged.description =
+                        member.description.trimmed();
+                }
+
+                if (merged.desktopFile
+                        .trimmed()
+                        .isEmpty() &&
+                    !member.desktopFile
+                         .trimmed()
+                         .isEmpty()) {
+                    merged.desktopFile =
+                        member.desktopFile;
+                }
+
+                for (const QString &file :
+                     member.files) {
+                    if (!file.trimmed().isEmpty() &&
+                        !files.contains(file)) {
+                        files.append(file);
+                    }
+                }
+            }
+
+            if (!files.contains(path))
+                files.append(path);
+
+            if (!merged.desktopFile
+                     .trimmed()
+                     .isEmpty() &&
+                !files.contains(
+                    merged.desktopFile)) {
+                files.append(
+                    merged.desktopFile);
+            }
+
+            const QFileInfo info(path);
+
+            merged.installLocation =
+                path;
+
+            merged.installLocations = {
+                path
+            };
+
+            merged.files =
+                files;
+
+            merged.executable =
+                path;
+
+            merged.installedSize =
+                manualSizeText(
+                    static_cast<quint64>(
+                        info.size()));
+
+            if (merged.installDate
+                    .trimmed()
+                    .isEmpty()) {
+                QDateTime installTime =
+                    info.birthTime();
+
+                if (!installTime.isValid())
+                    installTime =
+                        info.lastModified();
+
+                if (installTime.isValid()) {
+                    merged.installDate =
+                        installTime.date()
+                            .toString(
+                                Qt::ISODate);
+
+                    merged.installDateEstimated =
+                        true;
+                }
+            }
+
+            merged.packageManager =
+                QStringLiteral("AppImage");
+
+            merged.source =
+                QStringLiteral("AppImage");
+
+            merged.type =
+                ApplicationType::AppImage;
+
+            merged.installed = true;
+            merged.removable = true;
+            merged.userInstalled = true;
+            merged.systemComponent = false;
+            merged.protectedComponent = false;
+
+            unchanged.append(merged);
+        }
+
+        applications =
+            std::move(unchanged);
+    }
+
+
+    static QString optApplicationRoot(
+        const QString &path)
+    {
+        QString cleaned =
+            QDir::cleanPath(path.trimmed());
+
+        if (!cleaned.startsWith(
+                QStringLiteral("/opt/"))) {
+            return {};
+        }
+
+        const QStringList parts =
+            cleaned.split(
+                QLatin1Char('/'),
+                Qt::SkipEmptyParts);
+
+        if (parts.size() < 2 ||
+            parts.at(0) !=
+                QStringLiteral("opt")) {
+            return {};
+        }
+
+        return QStringLiteral("/opt/") +
+            parts.at(1);
+    }
+
+
+    static QList<ApplicationInfo> detectDesktopOptApplications(
+        const QList<ApplicationInfo> &existing)
+    {
+        QList<ApplicationInfo> result;
+
+        QSet<QString> knownIds;
+        QSet<QString> knownRoots;
+
+        for (const ApplicationInfo &app :
+             existing) {
+            const QString id =
+                app.id.trimmed().toLower();
+
+            const QString root =
+                QDir::cleanPath(
+                    app.installLocation.trimmed());
+
+            if (!id.isEmpty() &&
+                (app.type == ApplicationType::RPM ||
+                 app.type == ApplicationType::Flatpak)) {
+                knownIds.insert(id);
+            }
+
+            if (!root.isEmpty() &&
+                (app.type == ApplicationType::RPM ||
+                 app.type == ApplicationType::Flatpak)) {
+                knownRoots.insert(root);
+            }
+        }
+
+        QMap<QString, ApplicationInfo> bestApps;
+        QMap<QString, int> bestScores;
+        QMap<QString, QStringList> launchers;
+
+        auto rpmOwns = [](const QString &candidate) {
+            if (candidate.trimmed().isEmpty())
+                return false;
+
+            QProcess process;
+
+            process.start(
+                QStringLiteral("rpm"),
+                {
+                    QStringLiteral("-qf"),
+                    candidate
+                });
+
+            if (!process.waitForFinished(5000)) {
+                process.kill();
+                process.waitForFinished();
+                return false;
+            }
+
+            return process.exitStatus() ==
+                       QProcess::NormalExit &&
+                   process.exitCode() == 0;
+        };
+
+        const QStringList desktopDirectories = {
+            QDir::homePath() +
+                QStringLiteral(
+                    "/.local/share/applications"),
+            QStringLiteral(
+                "/usr/local/share/applications"),
+            QStringLiteral(
+                "/usr/share/applications")
+        };
+
+        for (const QString &directoryPath :
+             desktopDirectories) {
+            QDir directory(directoryPath);
+
+            if (!directory.exists())
+                continue;
+
+            const QFileInfoList entries =
+                directory.entryInfoList(
+                    {
+                        QStringLiteral("*.desktop")
+                    },
+                    QDir::Files |
+                        QDir::Readable |
+                        QDir::NoDotAndDotDot,
+                    QDir::Name);
+
+            for (const QFileInfo &entry :
+                 entries) {
+                QSettings desktop(
+                    entry.absoluteFilePath(),
+                    QSettings::IniFormat);
+
+                desktop.beginGroup(
+                    QStringLiteral(
+                        "Desktop Entry"));
+
+                const QString type =
+                    desktop.value(
+                        QStringLiteral("Type"))
+                        .toString()
+                        .trimmed();
+
+                const bool hidden =
+                    desktop.value(
+                        QStringLiteral("Hidden"),
+                        false)
+                        .toBool();
+
+                const bool noDisplay =
+                    desktop.value(
+                        QStringLiteral("NoDisplay"),
+                        false)
+                        .toBool();
+
+                const QString name =
+                    desktop.value(
+                        QStringLiteral("Name"))
+                        .toString()
+                        .trimmed();
+
+                const QString genericName =
+                    desktop.value(
+                        QStringLiteral("GenericName"))
+                        .toString()
+                        .trimmed();
+
+                const QString comment =
+                    desktop.value(
+                        QStringLiteral("Comment"))
+                        .toString()
+                        .trimmed();
+
+                const QString exec =
+                    desktop.value(
+                        QStringLiteral("Exec"))
+                        .toString()
+                        .trimmed();
+
+                desktop.endGroup();
+
+                if (hidden ||
+                    (!type.isEmpty() &&
+                     type !=
+                         QStringLiteral(
+                             "Application")) ||
+                    name.isEmpty() ||
+                    exec.isEmpty()) {
+                    continue;
+                }
+
+                const QStringList execParts =
+                    QProcess::splitCommand(exec);
+
+                QString executable;
+
+                for (QString part :
+                     execParts) {
+                    part = part.trimmed();
+
+                    if (part.startsWith(
+                            QStringLiteral(
+                                "file://"))) {
+                        part = part.mid(7);
+                    }
+
+                    if (!part.startsWith(
+                            QStringLiteral(
+                                "/opt/"))) {
+                        continue;
+                    }
+
+                    const QFileInfo info(part);
+
+                    if (!info.exists() ||
+                        !info.isFile() ||
+                        !info.isExecutable()) {
+                        continue;
+                    }
+
+                    executable =
+                        info.canonicalFilePath();
+
+                    if (executable.isEmpty())
+                        executable =
+                            info.absoluteFilePath();
+
+                    break;
+                }
+
+                if (executable.isEmpty())
+                    continue;
+
+                if (isAppImageFile(
+                        executable)) {
+                    continue;
+                }
+
+                const QString installRoot =
+                    optApplicationRoot(
+                        executable);
+
+                if (installRoot.isEmpty() ||
+                    knownRoots.contains(
+                        installRoot) ||
+                    !QFileInfo(
+                        installRoot).isDir()) {
+                    continue;
+                }
+
+                if (rpmOwns(
+                        entry.absoluteFilePath()) ||
+                    rpmOwns(executable)) {
+                    continue;
+                }
+
+                QStringList &rootLaunchers =
+                    launchers[installRoot];
+
+                if (!rootLaunchers.contains(
+                        entry.absoluteFilePath())) {
+                    rootLaunchers.append(
+                        entry.absoluteFilePath());
+                }
+
+                QString id =
+                    entry.completeBaseName()
+                        .trimmed();
+
+                if (id.isEmpty())
+                    id = name;
+
+                if (knownIds.contains(
+                        id.toLower())) {
+                    continue;
+                }
+
+                const QString rootName =
+                    QFileInfo(installRoot)
+                        .fileName()
+                        .toLower();
+
+                const QString normalizedName =
+                    name.toLower();
+
+                const QString normalizedId =
+                    id.toLower();
+
+                const QString executableName =
+                    QFileInfo(executable)
+                        .fileName()
+                        .toLower();
+
+                int score = 0;
+
+                if (!comment.isEmpty())
+                    score += 40;
+
+                if (!genericName.isEmpty())
+                    score += 10;
+
+                if (!rootName.isEmpty() &&
+                    normalizedName.contains(
+                        rootName)) {
+                    score += 50;
+                }
+
+                if (!rootName.isEmpty() &&
+                    normalizedId.contains(
+                        rootName)) {
+                    score += 50;
+                }
+
+                if (!rootName.isEmpty() &&
+                    executableName ==
+                        rootName) {
+                    score += 80;
+                }
+
+                if (executable.contains(
+                        QStringLiteral("/bin/"))) {
+                    score += 30;
+                }
+
+                if (entry.absoluteFilePath()
+                        .startsWith(
+                            QDir::homePath() +
+                            QStringLiteral(
+                                "/.local/share/applications/"))) {
+                    score += 15;
+                }
+
+                const QString helperText =
+                    (normalizedName +
+                     QLatin1Char(' ') +
+                     normalizedId +
+                     QLatin1Char(' ') +
+                     executableName);
+
+                const QStringList helperTerms = {
+                    QStringLiteral("uninstall"),
+                    QStringLiteral("installer"),
+                    QStringLiteral("setup"),
+                    QStringLiteral("updater"),
+                    QStringLiteral("update"),
+                    QStringLiteral("capture log"),
+                    QStringLiteral("diagnostic"),
+                    QStringLiteral("helper"),
+                    QStringLiteral("daemon")
+                };
+
+                for (const QString &term :
+                     helperTerms) {
+                    if (helperText.contains(term))
+                        score -= 200;
+                }
+
+                if (noDisplay)
+                    score -= 75;
+
+                if (bestScores.contains(
+                        installRoot) &&
+                    bestScores.value(
+                        installRoot) >= score) {
+                    continue;
+                }
+
+                ApplicationInfo app;
+
+                app.name = name;
+                app.id = id;
+
+                if (!comment.isEmpty()) {
+                    app.description =
+                        comment;
+                }
+                else if (!genericName.isEmpty() &&
+                         genericName.compare(
+                             name,
+                             Qt::CaseInsensitive) != 0) {
+                    app.description =
+                        genericName;
+                }
+
+                app.version =
+                    manualPythonPackageVersion(
+                        installRoot,
+                        id);
+
+                app.installedSize =
+                    manualSizeText(
+                        manualDirectorySize(
+                            installRoot));
+
+                const QFileInfo rootInfo(
+                    installRoot);
+
+                QDateTime installTime =
+                    rootInfo.birthTime();
+
+                if (!installTime.isValid())
+                    installTime =
+                        rootInfo.lastModified();
+
+                if (installTime.isValid()) {
+                    app.installDate =
+                        installTime.date()
+                            .toString(
+                                Qt::ISODate);
+
+                    app.installDateEstimated =
+                        true;
+                }
+
+                app.executable =
+                    executable;
+
+                app.desktopFile =
+                    entry.absoluteFilePath();
+
+                app.installLocation =
+                    installRoot;
+
+                app.packageManager =
+                    QStringLiteral(
+                        "Manual / Local");
+
+                app.source =
+                    QStringLiteral("Local");
+
+                app.installLocations = {
+                    installRoot
+                };
+
+                app.type =
+                    ApplicationType::Custom;
+
+                app.risk =
+                    RiskLevel::Unknown;
+
+                app.installed = true;
+                app.removable = true;
+                app.userInstalled = true;
+                app.systemComponent = false;
+                app.protectedComponent = false;
+
+                bestApps.insert(
+                    installRoot,
+                    app);
+
+                bestScores.insert(
+                    installRoot,
+                    score);
+            }
+        }
+
+        for (auto it =
+                 bestApps.begin();
+             it != bestApps.end();
+             ++it) {
+            ApplicationInfo app =
+                it.value();
+
+            QStringList files =
+                launchers.value(
+                    it.key());
+
+            if (!app.executable.isEmpty() &&
+                !files.contains(
+                    app.executable)) {
+                files.append(
+                    app.executable);
+            }
+
+            files.removeDuplicates();
+
+            app.files = files;
+
+            result.append(app);
+        }
+
+        return result;
+    }
+
+
+    static QString manualOptRootFor(
+        const ApplicationInfo &app)
+    {
+        QString root =
+            optApplicationRoot(
+                app.installLocation);
+
+        if (!root.isEmpty())
+            return root;
+
+        const QStringList execParts =
+            QProcess::splitCommand(
+                app.executable.trimmed());
+
+        for (QString part : execParts) {
+            part = part.trimmed();
+
+            if (part.startsWith(
+                    QStringLiteral("file://"))) {
+                part = part.mid(7);
+            }
+
+            root =
+                optApplicationRoot(part);
+
+            if (!root.isEmpty())
+                return root;
+        }
+
+        for (const QString &file :
+             app.files) {
+            root =
+                optApplicationRoot(file);
+
+            if (!root.isEmpty())
+                return root;
+        }
+
+        return {};
+    }
+
+
+    static int manualOptApplicationScore(
+        const ApplicationInfo &app,
+        const QString &root)
+    {
+        int score = 0;
+
+        const QString rootName =
+            QFileInfo(root)
+                .fileName()
+                .toLower();
+
+        const QString name =
+            app.name.trimmed().toLower();
+
+        const QString id =
+            app.id.trimmed().toLower();
+
+        const QString executable =
+            app.executable.trimmed();
+
+        QString executableName;
+
+        const QStringList parts =
+            QProcess::splitCommand(
+                executable);
+
+        for (QString part : parts) {
+            part = part.trimmed();
+
+            if (part.startsWith(
+                    QStringLiteral("file://"))) {
+                part = part.mid(7);
+            }
+
+            if (!part.startsWith(root))
+                continue;
+
+            executableName =
+                QFileInfo(part)
+                    .fileName()
+                    .toLower();
+
+            break;
+        }
+
+        if (!app.description
+                 .trimmed()
+                 .isEmpty()) {
+            score += 100;
+        }
+
+        if (!rootName.isEmpty() &&
+            name.contains(rootName)) {
+            score += 80;
+        }
+
+        if (!rootName.isEmpty() &&
+            id.contains(rootName)) {
+            score += 60;
+        }
+
+        if (!rootName.isEmpty() &&
+            executableName == rootName) {
+            score += 150;
+        }
+
+        if (executable.contains(
+                QStringLiteral("/bin/"))) {
+            score += 40;
+        }
+
+        if (!app.desktopFile.isEmpty())
+            score += 20;
+
+        const QString helperText =
+            name +
+            QLatin1Char(' ') +
+            id +
+            QLatin1Char(' ') +
+            executableName;
+
+        const QStringList helperTerms = {
+            QStringLiteral("uninstall"),
+            QStringLiteral("installer"),
+            QStringLiteral("setup"),
+            QStringLiteral("updater"),
+            QStringLiteral("update"),
+            QStringLiteral("capture log"),
+            QStringLiteral("diagnostic"),
+            QStringLiteral("helper"),
+            QStringLiteral("daemon")
+        };
+
+        for (const QString &term :
+             helperTerms) {
+            if (helperText.contains(term))
+                score -= 300;
+        }
+
+        return score;
+    }
+
+
+    static bool manualOptHelperLike(
+        const ApplicationInfo &app)
+    {
+        const QString text =
+            (app.name +
+             QLatin1Char(' ') +
+             app.id +
+             QLatin1Char(' ') +
+             QFileInfo(
+                 app.executable)
+                 .fileName())
+                .toLower();
+
+        const QStringList terms = {
+            QStringLiteral("uninstall"),
+            QStringLiteral("installer"),
+            QStringLiteral("setup"),
+            QStringLiteral("updater"),
+            QStringLiteral("update"),
+            QStringLiteral("capture log"),
+            QStringLiteral("diagnostic"),
+            QStringLiteral("helper"),
+            QStringLiteral("daemon")
+        };
+
+        for (const QString &term :
+             terms) {
+            if (text.contains(term))
+                return true;
+        }
+
+        return false;
+    }
+
+
+    static void collapseManualOptApplications(
+        QList<ApplicationInfo> &applications)
+    {
+        QMap<QString, QList<ApplicationInfo>> groups;
+        QList<ApplicationInfo> unchanged;
+
+        for (const ApplicationInfo &app :
+             applications) {
+            if (app.type ==
+                    ApplicationType::RPM ||
+                app.type ==
+                    ApplicationType::Flatpak ||
+                app.type ==
+                    ApplicationType::AppImage) {
+                unchanged.append(app);
+                continue;
+            }
+
+            const QString root =
+                manualOptRootFor(app);
+
+            if (root.isEmpty() ||
+                !QFileInfo(root).isDir()) {
+                unchanged.append(app);
+                continue;
+            }
+
+            groups[root].append(app);
+        }
+
+        for (auto it =
+                 groups.cbegin();
+             it != groups.cend();
+             ++it) {
+            const QString root =
+                it.key();
+
+            const QList<ApplicationInfo> members =
+                it.value();
+
+            if (members.isEmpty())
+                continue;
+
+            int bestIndex = 0;
+            int bestScore =
+                manualOptApplicationScore(
+                    members.first(),
+                    root);
+
+            for (int i = 1;
+                 i < members.size();
+                 ++i) {
+                const int score =
+                    manualOptApplicationScore(
+                        members.at(i),
+                        root);
+
+                if (score > bestScore) {
+                    bestScore = score;
+                    bestIndex = i;
+                }
+            }
+
+            ApplicationInfo merged =
+                members.at(bestIndex);
+
+            QStringList files;
+            QStringList locations = {
+                root
+            };
+
+            for (const ApplicationInfo &member :
+                 members) {
+                if (merged.description
+                        .trimmed()
+                        .isEmpty() &&
+                    !member.description
+                         .trimmed()
+                         .isEmpty()) {
+                    merged.description =
+                        member.description.trimmed();
+                }
+
+                if (merged.version
+                        .trimmed()
+                        .isEmpty() &&
+                    !member.version
+                         .trimmed()
+                         .isEmpty()) {
+                    merged.version =
+                        member.version.trimmed();
+                }
+
+                if (merged.desktopFile
+                        .trimmed()
+                        .isEmpty() &&
+                    !member.desktopFile
+                         .trimmed()
+                         .isEmpty()) {
+                    merged.desktopFile =
+                        member.desktopFile;
+                }
+
+                for (const QString &file :
+                     member.files) {
+                    if (!file.trimmed().isEmpty() &&
+                        !files.contains(file)) {
+                        files.append(file);
+                    }
+                }
+
+                if (!member.desktopFile
+                         .trimmed()
+                         .isEmpty() &&
+                    !files.contains(
+                        member.desktopFile)) {
+                    files.append(
+                        member.desktopFile);
+                }
+            }
+
+            if (merged.installedSize
+                    .trimmed()
+                    .isEmpty()) {
+                merged.installedSize =
+                    manualSizeText(
+                        manualDirectorySize(
+                            root));
+            }
+
+            if (merged.installDate
+                    .trimmed()
+                    .isEmpty()) {
+                const QFileInfo rootInfo(
+                    root);
+
+                QDateTime installTime =
+                    rootInfo.birthTime();
+
+                if (!installTime.isValid())
+                    installTime =
+                        rootInfo.lastModified();
+
+                if (installTime.isValid()) {
+                    merged.installDate =
+                        installTime.date()
+                            .toString(
+                                Qt::ISODate);
+
+                    merged.installDateEstimated =
+                        true;
+                }
+            }
+
+            merged.installLocation =
+                root;
+
+            merged.installLocations =
+                locations;
+
+            merged.files =
+                files;
+
+            merged.packageManager =
+                QStringLiteral(
+                    "Manual / Local");
+
+            merged.source =
+                QStringLiteral("Local");
+
+            merged.type =
+                ApplicationType::Custom;
+
+            merged.installed = true;
+            merged.removable = true;
+            merged.userInstalled = true;
+            merged.systemComponent = false;
+            merged.protectedComponent = false;
+
+            unchanged.append(merged);
+
+            QSet<QString> componentKeys;
+
+            for (int i = 0;
+                 i < members.size();
+                 ++i) {
+                if (i == bestIndex)
+                    continue;
+
+                const ApplicationInfo &member =
+                    members.at(i);
+
+                if (member.desktopFile
+                        .trimmed()
+                        .isEmpty() ||
+                    manualOptHelperLike(
+                        member)) {
+                    continue;
+                }
+
+                const QString memberName =
+                    member.name
+                        .trimmed();
+
+                if (memberName.isEmpty() ||
+                    memberName.compare(
+                        merged.name,
+                        Qt::CaseInsensitive) == 0) {
+                    continue;
+                }
+
+                const QString key =
+                    memberName.toLower() +
+                    QLatin1Char('|') +
+                    member.desktopFile
+                        .trimmed()
+                        .toLower();
+
+                if (componentKeys.contains(key))
+                    continue;
+
+                componentKeys.insert(key);
+
+                ApplicationInfo component =
+                    member;
+
+                component.installLocation =
+                    root;
+
+                component.installLocations = {
+                    root
+                };
+
+                component.packageManager =
+                    QStringLiteral(
+                        "Manual / Local (Bundled)");
+
+                component.source =
+                    QStringLiteral(
+                        "Bundled component");
+
+                component.installedSize.clear();
+
+                component.installDate =
+                    merged.installDate;
+
+                component.installDateEstimated =
+                    merged.installDateEstimated;
+
+                if (component.description
+                        .trimmed()
+                        .isEmpty()) {
+                    component.description =
+                        QStringLiteral(
+                            "Bundled component of %1")
+                            .arg(
+                                merged.name.isEmpty()
+                                    ? QFileInfo(root)
+                                          .fileName()
+                                    : merged.name);
+                }
+
+                component.type =
+                    ApplicationType::Custom;
+
+                component.installed = true;
+                component.removable = false;
+                component.userInstalled = true;
+                component.systemComponent = false;
+                component.protectedComponent = false;
+
+                unchanged.append(component);
+            }
+        }
+
+        applications =
+            std::move(unchanged);
+    }
+
+
+    static QString cleanMetadataText(
+        QString value)
+    {
+        value.remove(
+            QRegularExpression(
+                QStringLiteral(
+                    R"(<[^>]+>)")));
+
+        value.replace(
+            QStringLiteral("&quot;"),
+            QStringLiteral("\""));
+
+        value.replace(
+            QStringLiteral("&apos;"),
+            QStringLiteral("'"));
+
+        value.replace(
+            QStringLiteral("&lt;"),
+            QStringLiteral("<"));
+
+        value.replace(
+            QStringLiteral("&gt;"),
+            QStringLiteral(">"));
+
+        value.replace(
+            QStringLiteral("&amp;"),
+            QStringLiteral("&"));
+
+        return value.simplified();
+    }
+
+
+    static QStringList localMetadataDirectories(
+        const ApplicationInfo &app)
+    {
+        QStringList directories;
+
+        auto addCandidate =
+            [&directories](QString candidate) {
+                candidate =
+                    candidate.trimmed();
+
+                if (candidate.startsWith(
+                        QStringLiteral(
+                            "file://"))) {
+                    candidate =
+                        candidate.mid(7);
+                }
+
+                if (candidate.isEmpty())
+                    return;
+
+                QFileInfo info(candidate);
+
+                if (!info.exists())
+                    return;
+
+                QString current;
+
+                if (info.isDir()) {
+                    current =
+                        info.canonicalFilePath();
+
+                    if (current.isEmpty())
+                        current =
+                            info.absoluteFilePath();
+                }
+                else {
+                    QString canonical =
+                        info.canonicalFilePath();
+
+                    if (canonical.isEmpty())
+                        canonical =
+                            info.absoluteFilePath();
+
+                    current =
+                        QFileInfo(canonical)
+                            .absolutePath();
+                }
+
+                for (int depth = 0;
+                     depth < 4 &&
+                     !current.isEmpty() &&
+                     current !=
+                         QStringLiteral("/");
+                     ++depth) {
+                    current =
+                        QDir::cleanPath(
+                            current);
+
+                    if (!directories.contains(
+                            current)) {
+                        directories.append(
+                            current);
+                    }
+
+                    const QString parent =
+                        QFileInfo(current)
+                            .absolutePath();
+
+                    if (parent == current)
+                        break;
+
+                    current = parent;
+                }
+            };
+
+        addCandidate(
+            app.installLocation);
+
+        for (const QString &location :
+             app.installLocations) {
+            addCandidate(location);
+        }
+
+        const QStringList execParts =
+            QProcess::splitCommand(
+                app.executable.trimmed());
+
+        for (QString part :
+             execParts) {
+            part = part.trimmed();
+
+            if (part.isEmpty() ||
+                part.startsWith(
+                    QLatin1Char('%'))) {
+                continue;
+            }
+
+            addCandidate(part);
+        }
+
+        if (!app.desktopFile
+                 .trimmed()
+                 .isEmpty() &&
+            QFileInfo::exists(
+                app.desktopFile)) {
+            QSettings desktop(
+                app.desktopFile,
+                QSettings::IniFormat);
+
+            desktop.beginGroup(
+                QStringLiteral(
+                    "Desktop Entry"));
+
+            addCandidate(
+                desktop.value(
+                    QStringLiteral("TryExec"))
+                    .toString());
+
+            const QString exec =
+                desktop.value(
+                    QStringLiteral("Exec"))
+                    .toString();
+
+            desktop.endGroup();
+
+            const QStringList parts =
+                QProcess::splitCommand(exec);
+
+            for (QString part :
+                 parts) {
+                part = part.trimmed();
+
+                if (part.isEmpty() ||
+                    part.startsWith(
+                        QLatin1Char('%'))) {
+                    continue;
+                }
+
+                addCandidate(part);
+            }
+        }
+
+        return directories;
+    }
+
+
+    static QStringList resolvedLocalLauncherTargets(
+        const ApplicationInfo &app)
+    {
+        QStringList targets;
+
+        auto addTarget =
+            [&targets](QString candidate) {
+                candidate =
+                    candidate.trimmed();
+
+                if (candidate.startsWith(
+                        QStringLiteral(
+                            "file://"))) {
+                    candidate =
+                        candidate.mid(7);
+                }
+
+                if (!QDir::isAbsolutePath(
+                        candidate)) {
+                    return;
+                }
+
+                const QFileInfo info(candidate);
+
+                if (!info.isFile())
+                    return;
+
+                QString canonical =
+                    info.canonicalFilePath();
+
+                if (canonical.isEmpty())
+                    canonical =
+                        info.absoluteFilePath();
+
+                if (!targets.contains(
+                        canonical)) {
+                    targets.append(
+                        canonical);
+                }
+            };
+
+        auto addCommand =
+            [&addTarget](
+                const QString &command) {
+                const QStringList parts =
+                    QProcess::splitCommand(
+                        command.trimmed());
+
+                const QRegularExpression assignment(
+                    QStringLiteral(
+                        R"(^[A-Za-z_][A-Za-z0-9_]*=.*$)"));
+
+                for (QString part : parts) {
+                    part =
+                        part.trimmed();
+
+                    if (part.isEmpty() ||
+                        part ==
+                            QStringLiteral("env") ||
+                        part.startsWith(
+                            QLatin1Char('%')) ||
+                        assignment.match(part)
+                            .hasMatch()) {
+                        continue;
+                    }
+
+                    addTarget(part);
+                }
+            };
+
+        addCommand(
+            app.executable);
+
+        if (!app.desktopFile
+                 .trimmed()
+                 .isEmpty() &&
+            QFileInfo::exists(
+                app.desktopFile)) {
+            QSettings desktop(
+                app.desktopFile,
+                QSettings::IniFormat);
+
+            desktop.beginGroup(
+                QStringLiteral(
+                    "Desktop Entry"));
+
+            addTarget(
+                desktop.value(
+                    QStringLiteral("TryExec"))
+                    .toString());
+
+            addCommand(
+                desktop.value(
+                    QStringLiteral("Exec"))
+                    .toString());
+
+            desktop.endGroup();
+        }
+
+        for (int index = 0;
+             index < targets.size();
+             ++index) {
+            const QString candidate =
+                targets.at(index);
+
+            const QFileInfo info(
+                candidate);
+
+            if (!info.isFile() ||
+                info.size() <= 0 ||
+                info.size() > 131072) {
+                continue;
+            }
+
+            QFile file(candidate);
+
+            if (!file.open(
+                    QIODevice::ReadOnly |
+                    QIODevice::Text)) {
+                continue;
+            }
+
+            const QString contents =
+                QString::fromUtf8(
+                    file.read(131072));
+
+            file.close();
+
+            if (!contents.startsWith(
+                    QStringLiteral("#!"))) {
+                continue;
+            }
+
+            const QRegularExpression homeTarget(
+                QStringLiteral(
+                    R"((?:exec\s+)?["']?(?:\$HOME|\$\{HOME\}|~)(/[^"'\s]+))"));
+
+            QRegularExpressionMatchIterator
+                homeMatches =
+                    homeTarget.globalMatch(
+                        contents);
+
+            while (homeMatches.hasNext()) {
+                const QString relative =
+                    homeMatches.next()
+                        .captured(1);
+
+                if (!relative.isEmpty()) {
+                    addTarget(
+                        QDir::homePath() +
+                        relative);
+                }
+            }
+
+            const QRegularExpression absoluteTarget(
+                QStringLiteral(
+                    R"(exec\s+["']?(/[^"'\s]+))"));
+
+            QRegularExpressionMatchIterator
+                absoluteMatches =
+                    absoluteTarget.globalMatch(
+                        contents);
+
+            while (absoluteMatches.hasNext()) {
+                const QString absolute =
+                    absoluteMatches.next()
+                        .captured(1);
+
+                if (!absolute.isEmpty())
+                    addTarget(absolute);
+            }
+        }
+
+        return targets;
+    }
+
+
+    static QString structuredApplicationIniVersion(
+        const ApplicationInfo &app)
+    {
+        const QStringList targets =
+            resolvedLocalLauncherTargets(
+                app);
+
+        for (const QString &target :
+             targets) {
+            QFileInfo info(target);
+
+            QString directory =
+                info.isDir()
+                    ? info.absoluteFilePath()
+                    : info.absolutePath();
+
+            for (int depth = 0;
+                 depth < 4 &&
+                 !directory.isEmpty() &&
+                 directory !=
+                     QStringLiteral("/");
+                 ++depth) {
+                const QStringList candidates = {
+                    QDir(directory)
+                        .filePath(
+                            QStringLiteral(
+                                "application.ini")),
+                    QDir(directory)
+                        .filePath(
+                            QStringLiteral(
+                                "browser/application.ini"))
+                };
+
+                for (const QString &iniPath :
+                     candidates) {
+                    if (!QFileInfo::exists(
+                            iniPath)) {
+                        continue;
+                    }
+
+                    QSettings ini(
+                        iniPath,
+                        QSettings::IniFormat);
+
+                    ini.beginGroup(
+                        QStringLiteral("App"));
+
+                    const QString declaredName =
+                        ini.value(
+                            QStringLiteral("Name"))
+                            .toString()
+                            .trimmed();
+
+                    const QString version =
+                        ini.value(
+                            QStringLiteral("Version"))
+                            .toString()
+                            .trimmed();
+
+                    ini.endGroup();
+
+                    if (version.isEmpty())
+                        continue;
+
+                    if (!declaredName.isEmpty()) {
+                        const bool nameMatches =
+                            (!app.name
+                                  .trimmed()
+                                  .isEmpty() &&
+                             declaredName.compare(
+                                 app.name.trimmed(),
+                                 Qt::CaseInsensitive) == 0);
+
+                        const bool idMatches =
+                            (!app.id
+                                  .trimmed()
+                                  .isEmpty() &&
+                             declaredName.compare(
+                                 app.id.trimmed(),
+                                 Qt::CaseInsensitive) == 0);
+
+                        if (!nameMatches &&
+                            !idMatches) {
+                            continue;
+                        }
+                    }
+
+                    return version;
+                }
+
+                const QString parent =
+                    QFileInfo(directory)
+                        .absolutePath();
+
+                if (parent == directory)
+                    break;
+
+                directory = parent;
+            }
+        }
+
+        return {};
+    }
+
+
+    static QString desktopEntryValueFromText(
+        const QString &contents,
+        const QString &key)
+    {
+        bool inDesktopEntry = false;
+
+        const QStringList lines =
+            contents.split(
+                QLatin1Char('\n'));
+
+        for (QString line : lines) {
+            line =
+                line.trimmed();
+
+            if (line.startsWith(
+                    QLatin1Char('[')) &&
+                line.endsWith(
+                    QLatin1Char(']'))) {
+                inDesktopEntry =
+                    line.compare(
+                        QStringLiteral(
+                            "[Desktop Entry]"),
+                        Qt::CaseInsensitive) == 0;
+
+                continue;
+            }
+
+            if (!inDesktopEntry)
+                continue;
+
+            const QString prefix =
+                key +
+                QLatin1Char('=');
+
+            if (line.startsWith(
+                    prefix,
+                    Qt::CaseSensitive)) {
+                return line.mid(
+                    prefix.size())
+                    .trimmed();
+            }
+        }
+
+        return {};
+    }
+
+
+    static QStringList appImageMetadataPaths(
+        const QString &imagePath)
+    {
+        QStringList paths;
+
+        QProcess process;
+
+        process.start(
+            QStringLiteral("7z"),
+            {
+                QStringLiteral("l"),
+                QStringLiteral("-slt"),
+                imagePath
+            });
+
+        if (!process.waitForStarted(
+                5000)) {
+            return {};
+        }
+
+        if (!process.waitForFinished(
+                30000)) {
+            process.kill();
+            process.waitForFinished();
+            return {};
+        }
+
+        if (process.exitStatus() !=
+                QProcess::NormalExit ||
+            process.exitCode() != 0) {
+            return {};
+        }
+
+        const QString output =
+            QString::fromLocal8Bit(
+                process.readAllStandardOutput());
+
+        const QStringList lines =
+            output.split(
+                QLatin1Char('\n'));
+
+        for (QString line : lines) {
+            line =
+                line.trimmed();
+
+            if (!line.startsWith(
+                    QStringLiteral(
+                        "Path = "))) {
+                continue;
+            }
+
+            const QString candidate =
+                line.mid(7).trimmed();
+
+            if (candidate.endsWith(
+                    QStringLiteral(
+                        ".desktop"),
+                    Qt::CaseInsensitive) ||
+                candidate.endsWith(
+                    QStringLiteral(
+                        ".appdata.xml"),
+                    Qt::CaseInsensitive) ||
+                candidate.endsWith(
+                    QStringLiteral(
+                        ".metainfo.xml"),
+                    Qt::CaseInsensitive)) {
+                if (!paths.contains(
+                        candidate)) {
+                    paths.append(
+                        candidate);
+                }
+            }
+        }
+
+        return paths;
+    }
+
+
+    static QByteArray readAppImageMetadataPath(
+        const QString &imagePath,
+        const QString &archivePath)
+    {
+        QProcess process;
+
+        process.start(
+            QStringLiteral("7z"),
+            {
+                QStringLiteral("e"),
+                QStringLiteral("-so"),
+                QStringLiteral("-bd"),
+                QStringLiteral("-y"),
+                imagePath,
+                archivePath
+            });
+
+        if (!process.waitForStarted(
+                5000)) {
+            return {};
+        }
+
+        if (!process.waitForFinished(
+                30000)) {
+            process.kill();
+            process.waitForFinished();
+            return {};
+        }
+
+        if (process.exitStatus() !=
+                QProcess::NormalExit ||
+            process.exitCode() != 0) {
+            return {};
+        }
+
+        const QByteArray contents =
+            process.readAllStandardOutput();
+
+        if (contents.size() >
+                2 * 1024 * 1024) {
+            return {};
+        }
+
+        return contents;
+    }
+
+
+    static bool embeddedAppImageMetadata(
+        const QString &imagePath,
+        QString &name,
+        QString &version,
+        QString &description)
+    {
+        if (!isAppImageFile(
+                imagePath)) {
+            return false;
+        }
+
+        const QStringList paths =
+            appImageMetadataPaths(
+                imagePath);
+
+        if (paths.isEmpty())
+            return false;
+
+        int bestScore =
+            std::numeric_limits<int>::min();
+
+        QString bestName;
+        QString bestVersion;
+        QString bestDescription;
+
+        QSet<QString> summaries;
+
+        for (const QString &archivePath :
+             paths) {
+            const QByteArray bytes =
+                readAppImageMetadataPath(
+                    imagePath,
+                    archivePath);
+
+            if (bytes.isEmpty())
+                continue;
+
+            const QString contents =
+                QString::fromUtf8(
+                    bytes);
+
+            if (archivePath.endsWith(
+                    QStringLiteral(
+                        ".desktop"),
+                    Qt::CaseInsensitive)) {
+                const QString type =
+                    desktopEntryValueFromText(
+                        contents,
+                        QStringLiteral("Type"));
+
+                const QString hidden =
+                    desktopEntryValueFromText(
+                        contents,
+                        QStringLiteral("Hidden"));
+
+                const QString noDisplay =
+                    desktopEntryValueFromText(
+                        contents,
+                        QStringLiteral("NoDisplay"));
+
+                const QString candidateName =
+                    desktopEntryValueFromText(
+                        contents,
+                        QStringLiteral("Name"));
+
+                const QString genericName =
+                    desktopEntryValueFromText(
+                        contents,
+                        QStringLiteral(
+                            "GenericName"));
+
+                const QString comment =
+                    desktopEntryValueFromText(
+                        contents,
+                        QStringLiteral("Comment"));
+
+                const QString candidateVersion =
+                    desktopEntryValueFromText(
+                        contents,
+                        QStringLiteral(
+                            "X-AppImage-Version"));
+
+                if ((!type.isEmpty() &&
+                     type.compare(
+                         QStringLiteral(
+                             "Application"),
+                         Qt::CaseInsensitive) != 0) ||
+                    hidden.compare(
+                        QStringLiteral("true"),
+                        Qt::CaseInsensitive) == 0) {
+                    continue;
+                }
+
+                int score = 0;
+
+                if (!candidateVersion.isEmpty())
+                    score += 150;
+
+                if (!comment.isEmpty())
+                    score += 120;
+
+                if (!candidateName.isEmpty())
+                    score += 50;
+
+                if (!genericName.isEmpty())
+                    score += 20;
+
+                if (noDisplay.compare(
+                        QStringLiteral("true"),
+                        Qt::CaseInsensitive) == 0) {
+                    score -= 80;
+                }
+
+                const QString helperText =
+                    (candidateName +
+                     QLatin1Char(' ') +
+                     archivePath)
+                        .toLower();
+
+                const QStringList helperTerms = {
+                    QStringLiteral("uninstall"),
+                    QStringLiteral("installer"),
+                    QStringLiteral("setup"),
+                    QStringLiteral("updater"),
+                    QStringLiteral("helper")
+                };
+
+                for (const QString &term :
+                     helperTerms) {
+                    if (helperText.contains(
+                            term)) {
+                        score -= 250;
+                    }
+                }
+
+                if (score > bestScore) {
+                    bestScore =
+                        score;
+
+                    bestName =
+                        candidateName;
+
+                    bestVersion =
+                        candidateVersion;
+
+                    if (!comment.isEmpty()) {
+                        bestDescription =
+                            comment;
+                    }
+                    else if (!genericName.isEmpty() &&
+                             genericName.compare(
+                                 candidateName,
+                                 Qt::CaseInsensitive) != 0) {
+                        bestDescription =
+                            genericName;
+                    }
+                    else {
+                        bestDescription.clear();
+                    }
+                }
+
+                continue;
+            }
+
+            const QRegularExpression summaryExpression(
+                QStringLiteral(
+                    R"(<summary(?:\s[^>]*)?>(.*?)</summary>)"),
+                QRegularExpression::
+                    CaseInsensitiveOption |
+                QRegularExpression::
+                    DotMatchesEverythingOption);
+
+            const QRegularExpressionMatch
+                summaryMatch =
+                    summaryExpression.match(
+                        contents);
+
+            if (summaryMatch.hasMatch()) {
+                const QString summary =
+                    cleanMetadataText(
+                        summaryMatch
+                            .captured(1));
+
+                if (!summary.isEmpty())
+                    summaries.insert(
+                        summary);
+            }
+        }
+
+        if (bestDescription.isEmpty() &&
+            summaries.size() == 1) {
+            bestDescription =
+                *summaries.cbegin();
+        }
+
+        bool changed = false;
+
+        if (name.trimmed().isEmpty() &&
+            !bestName.isEmpty()) {
+            name =
+                bestName;
+
+            changed = true;
+        }
+
+        if (version.trimmed().isEmpty() &&
+            !bestVersion.isEmpty()) {
+            version =
+                bestVersion;
+
+            changed = true;
+        }
+
+        if (description
+                .trimmed()
+                .isEmpty() &&
+            !bestDescription.isEmpty()) {
+            description =
+                cleanMetadataText(
+                    bestDescription);
+
+            changed = true;
+        }
+
+        return changed;
+    }
+
+
+    static void enrichManualOptDesktopMetadata(
+        ApplicationInfo &app)
+    {
+        const QString root =
+            manualOptRootFor(app);
+
+        if (root.isEmpty() ||
+            !QFileInfo(root).isDir()) {
+            return;
+        }
+
+        int bestScore =
+            std::numeric_limits<int>::min();
+
+        QString bestName;
+        QString bestDescription;
+        QString bestDesktop;
+        QString bestExecutable;
+
+        const QStringList directories = {
+            QDir::homePath() +
+                QStringLiteral(
+                    "/.local/share/applications"),
+            QStringLiteral(
+                "/usr/local/share/applications"),
+            QStringLiteral(
+                "/usr/share/applications")
+        };
+
+        for (const QString &directoryPath :
+             directories) {
+            QDir directory(
+                directoryPath);
+
+            if (!directory.exists())
+                continue;
+
+            const QFileInfoList entries =
+                directory.entryInfoList(
+                    {
+                        QStringLiteral(
+                            "*.desktop")
+                    },
+                    QDir::Files |
+                        QDir::Readable |
+                        QDir::NoDotAndDotDot,
+                    QDir::Name);
+
+            for (const QFileInfo &entry :
+                 entries) {
+                QSettings desktop(
+                    entry.absoluteFilePath(),
+                    QSettings::IniFormat);
+
+                desktop.beginGroup(
+                    QStringLiteral(
+                        "Desktop Entry"));
+
+                const QString type =
+                    desktop.value(
+                        QStringLiteral("Type"))
+                        .toString()
+                        .trimmed();
+
+                const bool hidden =
+                    desktop.value(
+                        QStringLiteral("Hidden"),
+                        false)
+                        .toBool();
+
+                const bool noDisplay =
+                    desktop.value(
+                        QStringLiteral(
+                            "NoDisplay"),
+                        false)
+                        .toBool();
+
+                const QString candidateName =
+                    desktop.value(
+                        QStringLiteral("Name"))
+                        .toString()
+                        .trimmed();
+
+                const QString genericName =
+                    desktop.value(
+                        QStringLiteral(
+                            "GenericName"))
+                        .toString()
+                        .trimmed();
+
+                const QString comment =
+                    desktop.value(
+                        QStringLiteral("Comment"))
+                        .toString()
+                        .trimmed();
+
+                const QString exec =
+                    desktop.value(
+                        QStringLiteral("Exec"))
+                        .toString()
+                        .trimmed();
+
+                const QString tryExec =
+                    desktop.value(
+                        QStringLiteral("TryExec"))
+                        .toString()
+                        .trimmed();
+
+                desktop.endGroup();
+
+                if (hidden ||
+                    (!type.isEmpty() &&
+                     type !=
+                        QStringLiteral(
+                            "Application"))) {
+                    continue;
+                }
+
+                const QString executable =
+                    desktopExecutablePath(
+                        exec,
+                        tryExec);
+
+                if (executable.isEmpty() ||
+                    optApplicationRoot(
+                        executable) != root) {
+                    continue;
+                }
+
+                int score = 0;
+
+                if (!comment.isEmpty())
+                    score += 120;
+
+                if (!candidateName.isEmpty())
+                    score += 40;
+
+                if (!genericName.isEmpty())
+                    score += 20;
+
+                if (executable.contains(
+                        QStringLiteral(
+                            "/bin/"))) {
+                    score += 40;
+                }
+
+                if (noDisplay)
+                    score -= 100;
+
+                const QString helperText =
+                    (candidateName +
+                     QLatin1Char(' ') +
+                     entry.completeBaseName())
+                        .toLower();
+
+                const QStringList helperTerms = {
+                    QStringLiteral("uninstall"),
+                    QStringLiteral("installer"),
+                    QStringLiteral("setup"),
+                    QStringLiteral("updater"),
+                    QStringLiteral("update"),
+                    QStringLiteral("capture log"),
+                    QStringLiteral("diagnostic"),
+                    QStringLiteral("helper"),
+                    QStringLiteral("daemon")
+                };
+
+                for (const QString &term :
+                     helperTerms) {
+                    if (helperText.contains(
+                            term)) {
+                        score -= 250;
+                    }
+                }
+
+                if (score <= bestScore)
+                    continue;
+
+                bestScore = score;
+                bestName =
+                    candidateName;
+
+                bestDesktop =
+                    entry.absoluteFilePath();
+
+                bestExecutable =
+                    executable;
+
+                if (!comment.isEmpty()) {
+                    bestDescription =
+                        comment;
+                }
+                else if (!genericName.isEmpty() &&
+                         genericName.compare(
+                             candidateName,
+                             Qt::CaseInsensitive) != 0) {
+                    bestDescription =
+                        genericName;
+                }
+                else {
+                    bestDescription.clear();
+                }
+            }
+        }
+
+        if (app.description
+                .trimmed()
+                .isEmpty() &&
+            !bestDescription.isEmpty()) {
+            app.description =
+                bestDescription;
+        }
+
+        if (app.name
+                .trimmed()
+                .isEmpty() &&
+            !bestName.isEmpty()) {
+            app.name =
+                bestName;
+        }
+
+        if (app.desktopFile
+                .trimmed()
+                .isEmpty() &&
+            !bestDesktop.isEmpty()) {
+            app.desktopFile =
+                bestDesktop;
+        }
+
+        if (app.executable
+                .trimmed()
+                .isEmpty() &&
+            !bestExecutable.isEmpty()) {
+            app.executable =
+                bestExecutable;
+        }
+    }
+
+
+    static QString desktopEntryValueFromFile(
+        const QString &desktopFile,
+        const QString &key)
+    {
+        if (desktopFile.trimmed().isEmpty())
+            return {};
+
+        QFile file(desktopFile);
+
+        if (!file.open(
+                QIODevice::ReadOnly |
+                QIODevice::Text)) {
+            return {};
+        }
+
+        const QByteArray bytes =
+            file.read(1024 * 1024);
+
+        file.close();
+
+        if (bytes.isEmpty())
+            return {};
+
+        return desktopEntryValueFromText(
+            QString::fromUtf8(bytes),
+            key);
+    }
+
+
+    static void enrichVerifiedLocalMetadata(
+        QList<ApplicationInfo> &applications)
+    {
+        for (ApplicationInfo &app :
+             applications) {
+            if (app.description
+                    .trimmed()
+                    .isEmpty() &&
+                !app.desktopFile
+                     .trimmed()
+                     .isEmpty() &&
+                QFileInfo::exists(
+                    app.desktopFile)) {
+                const QString displayName =
+                    desktopEntryValueFromFile(
+                        app.desktopFile,
+                        QStringLiteral("Name"));
+
+                const QString genericName =
+                    desktopEntryValueFromFile(
+                        app.desktopFile,
+                        QStringLiteral(
+                            "GenericName"));
+
+                const QString comment =
+                    desktopEntryValueFromFile(
+                        app.desktopFile,
+                        QStringLiteral("Comment"));
+
+                if (!comment.isEmpty()) {
+                    app.description =
+                        comment;
+                }
+                else if (!genericName.isEmpty() &&
+                         genericName.compare(
+                             displayName,
+                             Qt::CaseInsensitive) != 0) {
+                    app.description =
+                        genericName;
+                }
+            }
+
+            if (app.type ==
+                    ApplicationType::AppImage) {
+                const QString imagePath =
+                    appImagePathFor(
+                        app);
+
+                if (!imagePath.isEmpty() &&
+                    (app.version
+                         .trimmed()
+                         .isEmpty() ||
+                     app.description
+                         .trimmed()
+                         .isEmpty() ||
+                     app.name
+                         .trimmed()
+                         .isEmpty())) {
+                    embeddedAppImageMetadata(
+                        imagePath,
+                        app.name,
+                        app.version,
+                        app.description);
+                }
+            }
+
+            if (app.type !=
+                    ApplicationType::RPM &&
+                app.type !=
+                    ApplicationType::Flatpak &&
+                app.description
+                    .trimmed()
+                    .isEmpty()) {
+                enrichManualOptDesktopMetadata(
+                    app);
+            }
+
+            if (app.version
+                    .trimmed()
+                    .isEmpty() &&
+                app.type !=
+                    ApplicationType::RPM &&
+                app.type !=
+                    ApplicationType::Flatpak) {
+                app.version =
+                    structuredApplicationIniVersion(
+                        app);
+            }
+        }
+    }
+
+
+    static QList<ApplicationInfo> detectLinkedOptApplications(
+        const QList<ApplicationInfo> &existing)
+    {
+        QList<ApplicationInfo> result;
+        QSet<QString> knownIds;
+        QSet<QString> knownRoots;
+
+        for (const ApplicationInfo &app : existing) {
+            const QString id = app.id.trimmed().toLower();
+            const QString location =
+                QDir::cleanPath(app.installLocation.trimmed());
+
+            if (!id.isEmpty())
+                knownIds.insert(id);
+
+            if (!location.isEmpty())
+                knownRoots.insert(location);
+        }
+
+        auto rpmOwnsPath = [](const QString &path) {
+            QProcess process;
+            process.start(
+                QStringLiteral("rpm"),
+                {
+                    QStringLiteral("-qf"),
+                    path
+                });
+
+            if (!process.waitForFinished(5000)) {
+                process.kill();
+                process.waitForFinished();
+                return false;
+            }
+
+            return process.exitStatus() ==
+                       QProcess::NormalExit &&
+                   process.exitCode() == 0;
+        };
+
+        const QStringList directories = {
+            QStringLiteral("/usr/local/bin"),
+            QStringLiteral("/usr/local/sbin")
+        };
+
+        for (const QString &directoryPath : directories) {
+            QDir directory(directoryPath);
+
+            if (!directory.exists())
+                continue;
+
+            const QFileInfoList entries =
+                directory.entryInfoList(
+                    QDir::Files |
+                        QDir::System |
+                        QDir::NoDotAndDotDot,
+                    QDir::Name);
+
+            for (const QFileInfo &entry : entries) {
+                if (!entry.isSymLink())
+                    continue;
+
+                const QString linkPath =
+                    QDir::cleanPath(
+                        entry.absoluteFilePath());
+
+                QString targetPath =
+                    entry.symLinkTarget();
+
+                if (targetPath.isEmpty())
+                    continue;
+
+                if (!QDir::isAbsolutePath(targetPath)) {
+                    targetPath =
+                        QDir(entry.absolutePath())
+                            .absoluteFilePath(targetPath);
+                }
+
+                const QFileInfo targetInfo(targetPath);
+                const QString canonicalTarget =
+                    targetInfo.canonicalFilePath();
+
+                if (!canonicalTarget.isEmpty())
+                    targetPath = canonicalTarget;
+                else
+                    targetPath = QDir::cleanPath(targetPath);
+
+                const QFileInfo resolved(targetPath);
+
+                if (!resolved.isFile() ||
+                    !resolved.isExecutable()) {
+                    continue;
+                }
+
+                if (!targetPath.startsWith(
+                        QStringLiteral("/opt/"))) {
+                    continue;
+                }
+
+                const QStringList parts =
+                    targetPath.split(
+                        QLatin1Char('/'),
+                        Qt::SkipEmptyParts);
+
+                if (parts.size() < 2 ||
+                    parts.at(0) !=
+                        QStringLiteral("opt")) {
+                    continue;
+                }
+
+                const QString installRoot =
+                    QStringLiteral("/opt/") +
+                    parts.at(1);
+
+                if (!QFileInfo(installRoot).isDir() ||
+                    knownRoots.contains(installRoot)) {
+                    continue;
+                }
+
+                const QString id =
+                    entry.fileName().trimmed();
+
+                if (id.isEmpty() ||
+                    knownIds.contains(id.toLower())) {
+                    continue;
+                }
+
+                if (rpmOwnsPath(linkPath) ||
+                    rpmOwnsPath(targetPath)) {
+                    continue;
+                }
+
+                ApplicationInfo app;
+                app.name = id;
+                app.id = id;
+                app.description =
+                    QStringLiteral(
+                        "Locally installed application");
+                app.executable = linkPath;
+                app.installLocation = installRoot;
+                app.packageManager =
+                    QStringLiteral("Manual / Local");
+                app.source =
+                    QStringLiteral("Local");
+
+                app.version =
+                    manualPythonPackageVersion(
+                        installRoot,
+                        id);
+
+                app.installedSize =
+                    manualSizeText(
+                        manualDirectorySize(
+                            installRoot));
+
+                const QFileInfo installInfo(
+                    installRoot);
+
+                QDateTime installTime =
+                    installInfo.birthTime();
+
+                if (!installTime.isValid())
+                    installTime =
+                        installInfo.lastModified();
+
+                if (installTime.isValid()) {
+                    app.installDate =
+                        installTime.date()
+                            .toString(
+                                Qt::ISODate);
+
+                    app.installDateEstimated =
+                        true;
+                }
+
+                app.files = {
+                    linkPath,
+                    targetPath
+                };
+                app.installLocations = {
+                    installRoot
+                };
+                app.type =
+                    ApplicationType::Custom;
+                app.risk =
+                    RiskLevel::Unknown;
+                app.installed = true;
+                app.removable = true;
+                app.userInstalled = true;
+                app.systemComponent = false;
+                app.protectedComponent = false;
+
+                result.append(app);
+                knownIds.insert(id.toLower());
+                knownRoots.insert(installRoot);
+            }
+        }
+
+        return result;
+    }
+
+
     void refreshApplications()
     {
         if (applicationRefreshRunning)
@@ -10029,7 +13271,52 @@ void showFullApplicationList(
                     QList<ApplicationInfo> applications =
                         workerLibrary.applications();
 
+                    const QList<ApplicationInfo> localApplications =
+                        Window::detectLinkedOptApplications(
+                            applications);
+
+                    for (const ApplicationInfo &app :
+                         localApplications) {
+                        applications.append(app);
+                    }
+
+                    const QList<ApplicationInfo> desktopOptApplications =
+                        Window::detectDesktopOptApplications(
+                            applications);
+
+                    for (const ApplicationInfo &app :
+                         desktopOptApplications) {
+                        applications.append(app);
+                    }
+
+                    const QList<ApplicationInfo> desktopAppImages =
+                        Window::detectDesktopAppImages(
+                            applications);
+
+                    for (const ApplicationInfo &app :
+                         desktopAppImages) {
+                        applications.append(app);
+                    }
+
+                    const QList<ApplicationInfo> standaloneAppImages =
+                        Window::detectStandaloneAppImages(
+                            applications);
+
+                    for (const ApplicationInfo &app :
+                         standaloneAppImages) {
+                        applications.append(app);
+                    }
+
                     Window::enrichApplicationMetadata(
+                        applications);
+
+                    Window::collapseAppImageApplications(
+                        applications);
+
+                    Window::collapseManualOptApplications(
+                        applications);
+
+                    Window::enrichVerifiedLocalMetadata(
                         applications);
 
                     if (applications.isEmpty())
@@ -13608,7 +16895,7 @@ void showFullApplicationList(
                         QStringLiteral("Protected Manual/Local Application"),
                         QStringLiteral(
                             "%1 requires administrator privileges to remove. "
-                            "For security, TotalSweep v8.9.13 will not move administrator-owned manual/local files into the user-profile Quarantine and later restore them as root. "
+                            "For security, TotalSweep will not move administrator-owned manual/local files into the user-profile Quarantine and later restore them as root. "
                             "Nothing was removed.\n\n"
                             "You can leave the application installed, or explicitly disable manual/local application-file quarantine in Advanced Settings if you intend a permanent removal.")
                             .arg(displayName));
@@ -18389,7 +21676,7 @@ int main(
         "TotalSweep Uninstaller");
 
     app.setApplicationVersion(
-        "8.9.13");
+        "8.10.0");
 
     Window window;
 

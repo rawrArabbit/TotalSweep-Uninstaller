@@ -1,67 +1,54 @@
-# Security
+# Security Policy
 
-## Supported Version
+## Supported Versions
 
-The current public version of TotalSweep Uninstaller is **8.9.13**.
+The first public release of TotalSweep Uninstaller is **8.9.13**.
 
-Security fixes will mainly be made for the latest release while the project is being actively maintained.
+Security fixes will be provided for the current public release line as practical while the project is actively maintained.
 
-## Reporting a Security Problem
+## Reporting a Security Issue
 
-If you find something that could cause files to be deleted when they shouldn't be, allow commands to run with higher privileges, restore files somewhere unsafe, or otherwise affect the security of the system, please **do not post the details in a public issue**.
+Please do **not** open a public issue for a vulnerability that could cause unintended file deletion, privilege escalation, command injection, unsafe restoration, or other destructive behavior.
 
-Use GitHub's private vulnerability reporting instead.
+Instead, contact the maintainer privately through the security-reporting method provided on the project's GitHub repository once private vulnerability reporting is enabled.
 
-When reporting a problem, it helps if you include:
+When reporting a security issue, please include:
 
 - the TotalSweep version
-- your Fedora version
-- your KDE Plasma version
-- whether the app involved was RPM, Flatpak or manual/local
-- what you were trying to do
-- steps to reproduce the problem
-- any useful logs or error messages
-- whether anything on the system was changed or deleted
+- Fedora and KDE Plasma versions
+- whether the affected application was RPM, Flatpak, or manual/local
+- the exact operation being performed
+- steps required to reproduce the issue
+- relevant logs or error output with personal information removed
+- whether any files, packages, or system data were altered
 
-Please remove personal information from logs before sending them, and never include passwords, access tokens, private keys or anything similar.
+Please avoid including passwords, authentication secrets, private keys, access tokens, or unrelated personal data.
 
-## Administrator Access
+## Privilege and Quarantine Trust Boundary
 
-Some things TotalSweep does require administrator access.
+TotalSweep treats Quarantine metadata, package-cache files, and other data in the desktop user's profile as **untrusted at every administrator boundary**.
 
-TotalSweep uses Polkit / `pkexec` for those operations instead of running the entire app as root.
+- Metadata-driven file restores are not escalated to administrator privileges. Permission-restricted destinations remain untouched rather than turning user-writable metadata into a root file-placement instruction.
+- Permanent cleanup of user-profile Quarantine data is performed without privilege escalation. TotalSweep does not run a root recursive delete over a path chosen from Quarantine metadata.
+- For an exact local RPM restore, the preserved RPM is opened at desktop-user privilege and streamed into fresh root-private temporary storage. The privileged side rechecks the saved SHA-256, requires system-trusted RPM signature and digest verification, verifies the RPM package name and exact NEVRA, installs only that root-private verified copy, and verifies the installed identity afterward.
+- A user-writable local Flatpak bundle is never passed to a root/system Flatpak install. System-scope restore uses an explicitly approved configured-remote/current-version path instead.
+- Privileged filesystem operations reject paths whose parent chain can be replaced by the desktop user or escapes through a symlink.
 
-Anything stored in your normal user folders, including TotalSweep's Quarantine and package cache, is treated as untrusted before it is used for an administrator-level operation.
+When a protected recovery cannot be completed without crossing this boundary safely, TotalSweep fails closed and preserves the remaining data instead of escalating it.
 
-This is important because files in your home folder can be changed by your user account.
+## Scope
 
-For example:
+Security-sensitive areas include:
 
-- TotalSweep does not take a path from Quarantine and blindly restore it somewhere as root.
-- Files in the normal user Quarantine are deleted without giving the whole Quarantine folder root access.
-- A saved RPM is checked again before DNF is allowed to install it.
-- The RPM's SHA-256, package identity and trusted RPM signature/digests are checked again from a private root-owned temporary copy.
-- A Flatpak bundle stored in a user-writable location is not used for a system-wide Flatpak install.
-- Privileged file operations check paths again before doing anything and reject unsafe symlink or user-writable path situations.
-
-If TotalSweep cannot safely complete something that needs administrator access, it stops and leaves the remaining files alone instead of trying to force the operation through.
-
-## Security-Sensitive Areas
-
-The main security-sensitive areas are:
-
-- administrator operations through Polkit / `pkexec`
-- RPM / DNF uninstall and restore
-- Flatpak uninstall and restore
-- manual/local app removal
-- leftover deletion
-- Quarantine
-- restoring files
-- checking filesystem paths
-- protected system locations
+- privileged operations performed through Polkit / `pkexec`
+- RPM/DNF removal and restoration
+- Flatpak removal and restoration
+- manual/local application removal
+- leftover scanning and deletion
+- Quarantine operations
+- restore operations
+- path validation and protected-path handling
 - package ownership detection
-- anything involving user-controlled file paths or app names
+- handling of user-controlled application names and filesystem paths
 
-TotalSweep is currently built and tested on **Fedora 44 KDE Plasma**.
-
-Other Linux distributions are not supported yet.
+TotalSweep Uninstaller is currently developed and tested on **Fedora 44 KDE Plasma**. Other distributions are not currently supported or tested.

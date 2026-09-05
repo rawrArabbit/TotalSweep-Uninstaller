@@ -37,11 +37,6 @@ RemovalResult FlatpakRemover::remove(const RemovalRequest &request)
     QProcess p;
     p.start("pkexec", args);
 
-    /*
-     * Do not attempt to kill a pkexec child after authorization: pkexec may
-     * already have become the root target process.  Authentication itself is
-     * cancellable; once authorized, wait for the real privileged result.
-     */
     if (!p.waitForFinished(-1)) {
         result.error = QStringLiteral("Could not wait for the privileged Flatpak removal to finish.");
         return result;
