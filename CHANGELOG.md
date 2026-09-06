@@ -2,28 +2,44 @@
 
 All notable public changes to TotalSweep Uninstaller will be documented in this file.
 
+## [8.10.1] - 2026-09-05
+
+**Unified Uninstall**
+
+- Added `totalsweep-uninstall` for both RPM and source installations.
+- Automatically detects the install type and supports `--keep-data` and `--purge`.
+- Keeps the existing `PURGE` confirmation for complete removal.
+
+**Documentation**
+
+- Simplified the README installation and uninstall instructions.
+
 ## [8.10.0] - 2026-09-05
 
-### Application Detection
+**Application Detection**
+
 - improved support for Manual / Local apps installed outside RPM and Flatpak
 - added detection for apps installed under `/opt` and apps launched through local wrappers
 - improved handling of app suites that share the same installation folder
 - bundled tools are now separated from apps that can be safely removed on their own
 
-### AppImage Support
+**AppImage Support**
+
 - improved detection for manually installed and Gear Lever-managed AppImages
 - AppImages can now be detected by their actual file format instead of only by the `.AppImage` extension
 - added support for more common AppImage install locations
 - read embedded desktop and AppStream metadata when the AppImage provides it
 
-### Metadata
+**Metadata**
+
 - improved version and description detection for Flatpak, AppImage and Manual / Local apps
 - added support for version information stored in Mozilla-style `application.ini` files
 - improved handling of desktop-file descriptions and generic names
 - added size and estimated install-date detection for supported Manual / Local apps
 - version information is kept exactly as reported by the app's own metadata
 
-### Reliability
+**Reliability**
+
 - improved matching between apps, launchers and their installation files
 - installer, helper and uninstaller launchers are less likely to appear as separate removable apps
 - unavailable metadata is left as `Unknown` or `—` instead of using unreliable values

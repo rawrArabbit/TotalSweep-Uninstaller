@@ -21676,7 +21676,7 @@ int main(
         "TotalSweep Uninstaller");
 
     app.setApplicationVersion(
-        "8.10.0");
+        "8.10.1");
 
     Window window;
 

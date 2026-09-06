@@ -22,15 +22,64 @@ It is especially useful if you prefer using a GUI, are not very comfortable with
 
 ## Install TotalSweep
 
-Download `TotalSweep-Uninstaller-8.9.13.rpm` from the latest release.
+Download `TotalSweep-Uninstaller-8.10.1.rpm` from the latest release.
 
-The command below works if the RPM was downloaded to your `Downloads` folder:
+If the RPM was downloaded to your `Downloads` folder:
 
 ```bash
-sudo dnf install "$HOME/Downloads/TotalSweep-Uninstaller-8.9.13.rpm"
+sudo dnf install "$HOME/Downloads/TotalSweep-Uninstaller-8.10.1.rpm"
 ```
 
-If you downloaded the RPM somewhere else, replace the path in the command with the actual location of the downloaded file.
+If you downloaded it somewhere else, replace the path with the actual location of the RPM.
+
+If you downloaded the source instead, TotalSweep also includes an installer:
+
+```bash
+chmod +x install.sh
+./install.sh
+```
+
+If you prefer to build TotalSweep manually:
+
+```bash
+sudo dnf install gcc-c++ cmake qt6-qtbase-devel polkit flatpak
+
+mkdir -p build
+cd build
+cmake -DCMAKE_INSTALL_PREFIX=/usr/local ..
+cmake --build . --parallel
+sudo cmake --install .
+```
+
+If TotalSweep does not immediately appear in the application launcher:
+
+```bash
+kbuildsycoca6
+```
+
+## Uninstall TotalSweep
+
+To uninstall TotalSweep, run:
+
+```bash
+totalsweep-uninstall
+```
+
+TotalSweep automatically detects how it was installed and lets you either **remove the app while keeping your Quarantine, History, caches and settings**, or perform a **complete removal** that deletes them too, including:
+
+```text
+~/.local/share/TotalSweep Uninstaller/
+~/.config/TotalSweep/Uninstaller.conf
+```
+
+Complete removal requires you to type `PURGE` before the saved data is permanently deleted. Source or release files you downloaded yourself and shared Fedora dependencies are left alone.
+
+You can also choose either mode directly:
+
+```bash
+totalsweep-uninstall --keep-data
+totalsweep-uninstall --purge
+```
 
 ## How TotalSweep Works
 
@@ -70,14 +119,14 @@ Even with the files that **are** automatically selected, take a second and look 
 
 Instead of permanently deleting supported leftover files right away, TotalSweep can move them into Quarantine. This gives you a chance to restore them if you realize later that you needed something.
 
-TotalSweep can also save restore information for things like:
+TotalSweep can also save restore information for:
 
 - RPM apps
 - Flatpak apps
 - manual/local apps
 - leftover files
 
-What can actually be restored depends on what was saved when it was removed. Because of that, **restoring something is not always guaranteed**. You can also permanently delete things from Quarantine when you know you no longer need them.
+What can actually be restored depends on what was saved when it was removed, so **restoring something is not always guaranteed**. You can also permanently delete things from Quarantine when you know you no longer need them.
 
 ## Other things TotalSweep can do
 

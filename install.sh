@@ -14,3 +14,4 @@ kbuildsycoca6 >/dev/null 2>&1 || true
 echo
 echo "TotalSweep Uninstaller was installed successfully."
 echo "Run: totalsweep"
+echo "Uninstall: totalsweep-uninstall"
