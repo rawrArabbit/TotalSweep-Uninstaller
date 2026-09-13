@@ -10,15 +10,15 @@ It is especially useful if you prefer using a GUI, are not very comfortable with
 
 **Uninstall**
 
-![TotalSweep Uninstall tab](assets/screenshots/uninstall.png)
+![TotalSweep Uninstall tab](assets/screenshots/uninstall.jpg)
 
 **Leftovers**
 
-![TotalSweep Leftovers tab](assets/screenshots/leftovers.png)
+![TotalSweep Leftovers tab](assets/screenshots/leftovers.jpg)
 
 **Quarantine**
 
-![TotalSweep Quarantine tab](assets/screenshots/quarantine.png)
+![TotalSweep Quarantine tab](assets/screenshots/quarantine.jpg)
 
 ## Install TotalSweep
 

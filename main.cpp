@@ -174,6 +174,9 @@ static QString trustedDestructiveRootForPath(
         home,
         QStringLiteral("/usr/local"),
         QStringLiteral("/usr/libexec"),
+        QStringLiteral("/usr/lib64"),
+        QStringLiteral("/usr/lib"),
+        QStringLiteral("/usr/include"),
         QStringLiteral("/usr/sbin"),
         QStringLiteral("/usr/bin"),
         QStringLiteral("/usr/share"),
@@ -1073,6 +1076,13 @@ static QString applicationCachePath()
 {
     return totalSweepData() +
         QStringLiteral("/application-cache.json");
+}
+
+
+static QString pendingCleanupPath()
+{
+    return totalSweepData() +
+        QStringLiteral("/pending-cleanups.json");
 }
 
 
@@ -3436,6 +3446,8 @@ public:
         backendManager.registerBackend(new FlatpakBackend);
 
         buildInterface();
+        loadPendingCleanupProfiles();
+        refreshPendingCleanupUi();
 
         if (firstEverLaunch)
             applyFirstLaunchPresentationProfile();
@@ -3802,6 +3814,15 @@ protected:
 
 private:
 
+    struct PendingCleanupProfile {
+        QString key;
+        ApplicationInfo app;
+        QStringList searchTerms;
+        QString reason;
+        QDateTime createdUtc;
+        QDateTime expiresUtc;
+    };
+
     ApplicationBackendManager backendManager;
 
     ApplicationLibrary applicationLibrary{
@@ -3861,6 +3882,8 @@ private:
     QPushButton *cancelLeftoverScanBtn{};
     QPushButton *openLeftoverLocationBtn{};
     QPushButton *quarantineSelectedBtn{};
+    QGroupBox *pendingCleanupBox{};
+    QVBoxLayout *pendingCleanupLayout{};
     QMenu *leftoversViewMenu{};
     QMenu *leftoversColumnsSubmenu{};
     QMenu *leftoversSeparatorsSubmenu{};
@@ -3894,6 +3917,8 @@ private:
     QString currentApp;
     QStringList activeLeftoverSearchTerms;
     QStringList protectedOtherApplicationRoots;
+    QList<PendingCleanupProfile> pendingCleanupProfiles;
+    QString activePendingCleanupKey;
 
     QVector<Hit> hits;
 
@@ -4369,6 +4394,12 @@ private:
 
     void showAdvancedSettingsDialog()
     {
+        const QString applicationDisplayName =
+            QApplication::applicationDisplayName();
+
+        QApplication::setApplicationDisplayName(
+            QString());
+
         QDialog dialog(this);
         dialog.setWindowTitle(QStringLiteral("TotalSweep Settings"));
         dialog.setWindowIcon(totalSweepIcon());
@@ -4639,6 +4670,28 @@ private:
         scroll->setWidget(settingsPage);
         root->addWidget(scroll, 0);
 
+        auto *versionLabel = new QLabel(
+            QStringLiteral("TotalSweep Uninstaller  •  Version %1")
+                .arg(QApplication::applicationVersion()),
+            &dialog);
+        versionLabel->setAlignment(
+            Qt::AlignRight | Qt::AlignVCenter);
+        versionLabel->setSizePolicy(
+            QSizePolicy::Expanding,
+            QSizePolicy::Fixed);
+
+        QPalette versionPalette =
+            versionLabel->palette();
+        versionPalette.setColor(
+            QPalette::WindowText,
+            versionPalette.color(
+                QPalette::PlaceholderText));
+        versionLabel->setPalette(
+            versionPalette);
+
+        root->addWidget(
+            versionLabel);
+
         auto *recommended = new QPushButton(
             QStringLiteral("Restore Recommended Settings"),
             &dialog);
@@ -4855,8 +4908,9 @@ private:
             rootMargins.top() +
             rootMargins.bottom() +
             intro->sizeHint().height() +
+            versionLabel->sizeHint().height() +
             footer->sizeHint().height() +
-            (root->spacing() * 2);
+            (root->spacing() * 3);
 
         const int availableScrollHeight =
             qMax(260, maximumHeight - chromeHeight);
@@ -4874,7 +4928,14 @@ private:
 
         dialog.setFixedHeight(targetHeight);
         dialog.resize(targetWidth, targetHeight);
-        if (dialog.exec() != QDialog::Accepted)
+
+        const int dialogResult =
+            dialog.exec();
+
+        QApplication::setApplicationDisplayName(
+            applicationDisplayName);
+
+        if (dialogResult != QDialog::Accepted)
             return;
 
         totalsweep_restore::RestorePolicy updated =
@@ -6328,6 +6389,22 @@ private:
 
         applicationColumnsMenu->addSeparator();
 
+        auto *fitApplicationColumnsAction =
+            applicationColumnsMenu->addAction(
+                QStringLiteral(
+                    "Fit Columns to Window"));
+
+        connect(
+            fitApplicationColumnsAction,
+            &QAction::triggered,
+            this,
+            [this]() {
+                fitRecommendedApplicationColumnsToViewport();
+                saveApplicationHeader();
+                if (settings)
+                    settings->sync();
+            });
+
         applicationResetColumnsAction =
             applicationColumnsMenu->addAction(
                 QStringLiteral(
@@ -6886,6 +6963,19 @@ private:
             leftoversRowSeparators);
 
         leftoversViewMenu->addSeparator();
+        auto *fitLeftoversLayout = leftoversViewMenu->addAction(
+            QStringLiteral("Fit Columns to Window"));
+        connect(
+            fitLeftoversLayout,
+            &QAction::triggered,
+            this,
+            [this]() {
+                fitLeftoversColumnsToViewport();
+                saveHeader();
+                if (settings)
+                    settings->sync();
+            });
+
         auto *resetLeftoversLayout = leftoversViewMenu->addAction(
             QStringLiteral("Reset Table Layout"));
         connect(
@@ -6938,6 +7028,27 @@ private:
 
         layout->addLayout(
             leftoversSearchRow);
+
+        pendingCleanupBox =
+            new QGroupBox(
+                QStringLiteral("Pending Cleanups"),
+                leftoversTab);
+
+        pendingCleanupLayout =
+            new QVBoxLayout(
+                pendingCleanupBox);
+
+        pendingCleanupLayout->setContentsMargins(
+            12,
+            8,
+            12,
+            10);
+
+        pendingCleanupLayout->setSpacing(6);
+        pendingCleanupBox->setVisible(false);
+
+        layout->addWidget(
+            pendingCleanupBox);
 
         resultStatus =
         new QLabel(
@@ -7677,6 +7788,19 @@ private:
             quarantineRowSeparators);
 
         quarantineViewMenu->addSeparator();
+        auto *fitQuarantineLayout = quarantineViewMenu->addAction(
+            QStringLiteral("Fit Columns to Window"));
+        connect(
+            fitQuarantineLayout,
+            &QAction::triggered,
+            this,
+            [this]() {
+                fitQuarantineColumnsToViewport();
+                saveQuarantineHeader();
+                if (settings)
+                    settings->sync();
+            });
+
         auto *resetQuarantineLayout = quarantineViewMenu->addAction(
             QStringLiteral("Reset Table Layout"));
         connect(
@@ -13016,6 +13140,1084 @@ void showFullApplicationList(
     }
 
 
+    static bool isCMakeManifestSourceBuild(
+        const ApplicationInfo &app)
+    {
+        return app.type == ApplicationType::SourceBuild &&
+            app.source ==
+                QStringLiteral(
+                    "CMake install_manifest.txt");
+    }
+
+
+    static bool safeCMakeManifestRemovalTargetStatic(
+        const QString &target)
+    {
+        if (safeManualRemovalTargetStatic(target))
+            return true;
+
+        const QString raw =
+            target.trimmed();
+
+        if (raw.isEmpty())
+            return false;
+
+        const QString cleaned =
+            QDir::cleanPath(raw);
+
+        if (!QDir::isAbsolutePath(cleaned) ||
+            isTotalSweepManagedPath(cleaned)) {
+            return false;
+        }
+
+        const QFileInfo info(cleaned);
+
+        if ((!info.exists() && !info.isSymLink()) ||
+            info.isDir()) {
+            return false;
+        }
+
+        QString trustedRoot;
+
+        if (cleaned.startsWith(
+                QStringLiteral("/usr/lib64/"))) {
+            trustedRoot =
+                QStringLiteral("/usr/lib64");
+        }
+        else if (cleaned.startsWith(
+                     QStringLiteral("/usr/lib/"))) {
+            trustedRoot =
+                QStringLiteral("/usr/lib");
+        }
+        else if (cleaned.startsWith(
+                     QStringLiteral("/usr/include/"))) {
+            trustedRoot =
+                QStringLiteral("/usr/include");
+        }
+        else {
+            return false;
+        }
+
+        return !hasSymlinkedParentBelowRoot(
+                   cleaned,
+                   trustedRoot) &&
+            !hasUserWritableParentBelowRoot(
+                cleaned,
+                trustedRoot);
+    }
+
+
+    static QString cmakeCacheValue(
+        const QString &manifestPath,
+        const QString &key)
+    {
+        const QString cachePath =
+            QDir(
+                QFileInfo(manifestPath)
+                    .absolutePath())
+                .filePath(
+                    QStringLiteral(
+                        "CMakeCache.txt"));
+
+        QFile file(cachePath);
+
+        if (!file.open(
+                QIODevice::ReadOnly |
+                QIODevice::Text)) {
+            return {};
+        }
+
+        const QByteArray prefix =
+            key.toUtf8() + ':';
+
+        while (!file.atEnd()) {
+            const QByteArray line =
+                file.readLine().trimmed();
+
+            if (!line.startsWith(prefix))
+                continue;
+
+            const int equals =
+                line.indexOf('=');
+
+            if (equals < 0)
+                return {};
+
+            return QString::fromUtf8(
+                       line.mid(equals + 1))
+                .trimmed();
+        }
+
+        return {};
+    }
+
+
+    static QString normalizedCMakeProjectId(
+        QString value)
+    {
+        value = value.trimmed();
+
+        const QStringList suffixes = {
+            QStringLiteral("_installer"),
+            QStringLiteral("-installer"),
+            QStringLiteral(" installer"),
+            QStringLiteral("_build"),
+            QStringLiteral("-build"),
+            QStringLiteral(" build")
+        };
+
+        const QString folded =
+            value.toCaseFolded();
+
+        for (const QString &suffix : suffixes) {
+            if (!folded.endsWith(suffix))
+                continue;
+
+            const QString shortened =
+                value.left(
+                    value.size() -
+                    suffix.size())
+                    .trimmed();
+
+            if (shortened.size() >= 3) {
+                value = shortened;
+                break;
+            }
+        }
+
+        return value;
+    }
+
+
+    static QString cmakeProjectDisplayName(
+        QString value)
+    {
+        value =
+            normalizedCMakeProjectId(value);
+
+        value.replace(
+            QRegularExpression(
+                QStringLiteral("[_\\-.]+")),
+            QStringLiteral(" "));
+
+        const QStringList words =
+            value.split(
+                QLatin1Char(' '),
+                Qt::SkipEmptyParts);
+
+        QStringList displayed;
+
+        for (QString word : words) {
+            if (word.isEmpty())
+                continue;
+
+            if (word == word.toLower())
+                word[0] = word.at(0).toUpper();
+
+            displayed.append(word);
+        }
+
+        return displayed.join(
+            QLatin1Char(' '));
+    }
+
+
+    static QStringList readCMakeInstallManifest(
+        const QString &manifestPath)
+    {
+        const QFileInfo manifestInfo(
+            manifestPath);
+
+        if (!manifestInfo.isFile() ||
+            manifestInfo.isSymLink() ||
+            manifestInfo.size() >
+                4 * 1024 * 1024) {
+            return {};
+        }
+
+        QFile file(manifestPath);
+
+        if (!file.open(
+                QIODevice::ReadOnly |
+                QIODevice::Text)) {
+            return {};
+        }
+
+        QStringList result;
+        int count = 0;
+
+        while (!file.atEnd() &&
+               count < 4096) {
+            const QString raw =
+                QString::fromUtf8(
+                    file.readLine())
+                    .trimmed();
+
+            ++count;
+
+            if (raw.isEmpty())
+                continue;
+
+            const QString path =
+                QDir::cleanPath(raw);
+
+            if (!QDir::isAbsolutePath(path) ||
+                result.contains(path)) {
+                continue;
+            }
+
+            result.append(path);
+        }
+
+        return result;
+    }
+
+
+    static QStringList findCMakeInstallManifests()
+    {
+        QStringList result;
+
+        auto appendManifest =
+            [&result](
+                const QString &candidate) {
+
+                const QString path =
+                    QDir::cleanPath(candidate);
+
+                const QFileInfo info(path);
+
+                if (path.isEmpty() ||
+                    !QDir::isAbsolutePath(path) ||
+                    !info.isFile() ||
+                    info.isSymLink() ||
+                    info.size() >
+                        4 * 1024 * 1024) {
+                    return;
+                }
+
+                const QString cache =
+                    QDir(info.absolutePath())
+                        .filePath(
+                            QStringLiteral(
+                                "CMakeCache.txt"));
+
+                if (!QFileInfo(cache).isFile())
+                    return;
+
+                if (!result.contains(path))
+                    result.append(path);
+            };
+
+        auto collect =
+            [&appendManifest](
+                const QStringList &roots,
+                int maxDepth,
+                int timeout) {
+
+                QStringList existingRoots;
+
+                for (const QString &root : roots) {
+                    const QString cleaned =
+                        QDir::cleanPath(root);
+
+                    if (!QFileInfo(cleaned).isDir() ||
+                        existingRoots.contains(cleaned)) {
+                        continue;
+                    }
+
+                    existingRoots.append(cleaned);
+                }
+
+                if (existingRoots.isEmpty())
+                    return;
+
+                QStringList arguments =
+                    existingRoots;
+
+                arguments.append(
+                    QStringLiteral("-xdev"));
+                arguments.append(
+                    QStringLiteral("-maxdepth"));
+                arguments.append(
+                    QString::number(maxDepth));
+                arguments.append(
+                    QStringLiteral("-type"));
+                arguments.append(
+                    QStringLiteral("f"));
+                arguments.append(
+                    QStringLiteral("-name"));
+                arguments.append(
+                    QStringLiteral(
+                        "install_manifest.txt"));
+                arguments.append(
+                    QStringLiteral("-print"));
+
+                QProcess process;
+                process.start(
+                    QStringLiteral("find"),
+                    arguments);
+
+                if (!process.waitForStarted(3000))
+                    return;
+
+                if (!process.waitForFinished(timeout)) {
+                    process.kill();
+                    process.waitForFinished(500);
+                }
+
+                const QStringList lines =
+                    QString::fromLocal8Bit(
+                        process.readAllStandardOutput())
+                        .split(
+                            QLatin1Char('\n'),
+                            Qt::SkipEmptyParts);
+
+                for (const QString &line :
+                     lines.mid(0, 256)) {
+                    appendManifest(
+                        line.trimmed());
+                }
+            };
+
+        const QString home =
+            QDir::cleanPath(
+                QDir::homePath());
+
+        collect(
+            {home},
+            3,
+            6000);
+
+        QStringList roots = {
+            QStandardPaths::writableLocation(
+                QStandardPaths::DocumentsLocation),
+            QStandardPaths::writableLocation(
+                QStandardPaths::DownloadLocation),
+            QStandardPaths::writableLocation(
+                QStandardPaths::DesktopLocation),
+            home + QStringLiteral("/src"),
+            home + QStringLiteral("/Source"),
+            home + QStringLiteral("/source"),
+            home + QStringLiteral("/Projects"),
+            home + QStringLiteral("/projects"),
+            home + QStringLiteral("/Code"),
+            home + QStringLiteral("/code"),
+            home + QStringLiteral("/Development"),
+            home + QStringLiteral("/development"),
+            home + QStringLiteral("/.local/src"),
+            home + QStringLiteral("/build"),
+            home + QStringLiteral("/Build")
+        };
+
+        roots.removeAll(QString());
+        roots.removeDuplicates();
+
+        collect(
+            roots,
+            8,
+            15000);
+
+        const QString localSharePath =
+            home +
+            QStringLiteral("/.local/share");
+
+        QDir localShare(localSharePath);
+
+        if (localShare.exists()) {
+            const QFileInfoList directories =
+                localShare.entryInfoList(
+                    QDir::Dirs |
+                        QDir::NoDotAndDotDot,
+                    QDir::Name);
+
+            for (const QFileInfo &directory :
+                 directories) {
+                const QDir root(
+                    directory.absoluteFilePath());
+
+                const QStringList buildNames = {
+                    QStringLiteral("build"),
+                    QStringLiteral("Build")
+                };
+
+                for (const QString &buildName :
+                     buildNames) {
+                    appendManifest(
+                        root.filePath(
+                            buildName +
+                            QStringLiteral(
+                                "/install_manifest.txt")));
+                }
+
+                const QFileInfoList cmakeBuilds =
+                    root.entryInfoList(
+                        {
+                            QStringLiteral(
+                                "cmake-build-*")
+                        },
+                        QDir::Dirs |
+                            QDir::NoDotAndDotDot,
+                        QDir::Name);
+
+                for (const QFileInfo &build :
+                     cmakeBuilds) {
+                    appendManifest(
+                        QDir(
+                            build.absoluteFilePath())
+                            .filePath(
+                                QStringLiteral(
+                                    "install_manifest.txt")));
+                }
+            }
+        }
+
+        result.removeDuplicates();
+        return result;
+    }
+
+
+    static bool cmakeRuntimeExecutablePath(
+        const QString &path)
+    {
+        const QFileInfo info(path);
+
+        if (!info.isFile() ||
+            !info.isExecutable()) {
+            return false;
+        }
+
+        const QString cleaned =
+            QDir::cleanPath(path);
+
+        const QString home =
+            QDir::cleanPath(
+                QDir::homePath());
+
+        return cleaned.startsWith(
+                   QStringLiteral(
+                       "/usr/local/bin/")) ||
+            cleaned.startsWith(
+                QStringLiteral(
+                    "/usr/local/sbin/")) ||
+            cleaned.startsWith(
+                QStringLiteral(
+                    "/usr/local/libexec/")) ||
+            cleaned.startsWith(
+                QStringLiteral(
+                    "/usr/bin/")) ||
+            cleaned.startsWith(
+                QStringLiteral(
+                    "/usr/sbin/")) ||
+            cleaned.startsWith(
+                QStringLiteral(
+                    "/usr/libexec/")) ||
+            cleaned.startsWith(
+                home +
+                QStringLiteral(
+                    "/.local/bin/")) ||
+            cleaned.startsWith(
+                home +
+                QStringLiteral(
+                    "/.local/libexec/")) ||
+            (cleaned.startsWith(
+                 QStringLiteral("/opt/")) &&
+             cleaned.contains(
+                 QStringLiteral("/bin/")));
+    }
+
+
+    static bool cmakeRuntimePluginPath(
+        const QString &path)
+    {
+        const QFileInfo info(path);
+
+        if (!info.isFile() &&
+            !info.isSymLink()) {
+            return false;
+        }
+
+        const QString fileName =
+            info.fileName().toLower();
+
+        if (!fileName.endsWith(
+                QStringLiteral(".so")) &&
+            !fileName.contains(
+                QStringLiteral(".so."))) {
+            return false;
+        }
+
+        const QString lower =
+            QDir::cleanPath(path)
+                .toLower();
+
+        return lower.contains(
+                   QStringLiteral("/plugins/")) ||
+            lower.contains(
+                QStringLiteral("/kwin/")) ||
+            lower.contains(
+                QStringLiteral("/effects/")) ||
+            lower.contains(
+                QStringLiteral("/kcm/")) ||
+            lower.contains(
+                QStringLiteral("/modules/"));
+    }
+
+
+    static bool cmakeRuntimeServicePath(
+        const QString &path)
+    {
+        const QFileInfo info(path);
+
+        if (!info.isFile() &&
+            !info.isSymLink()) {
+            return false;
+        }
+
+        const QString lower =
+            QDir::cleanPath(path)
+                .toLower();
+
+        return (lower.endsWith(
+                    QStringLiteral(".desktop")) &&
+                lower.contains(
+                    QStringLiteral(
+                        "/applications/"))) ||
+            (lower.endsWith(
+                 QStringLiteral(".service")) &&
+             (lower.contains(
+                  QStringLiteral(
+                      "/dbus-1/services/")) ||
+              lower.contains(
+                  QStringLiteral(
+                      "/systemd/"))));
+    }
+
+
+    static QString relatedCMakeRuntimeAnchor(
+        const QStringList &paths,
+        const QString &projectKey,
+        QString *executable = nullptr)
+    {
+        QStringList executables;
+        QStringList plugins;
+        QStringList services;
+
+        for (const QString &path : paths) {
+            if (cmakeRuntimeExecutablePath(path)) {
+                executables.append(path);
+                continue;
+            }
+
+            if (cmakeRuntimePluginPath(path)) {
+                plugins.append(path);
+                continue;
+            }
+
+            if (cmakeRuntimeServicePath(path))
+                services.append(path);
+        }
+
+        auto pick =
+            [&projectKey](
+                const QStringList &values)
+                -> QString {
+
+                for (const QString &value : values) {
+                    if (normalizeApplicationName(
+                            value)
+                            .contains(projectKey)) {
+                        return value;
+                    }
+                }
+
+                return values.isEmpty()
+                    ? QString()
+                    : values.first();
+            };
+
+        const QString selectedExecutable =
+            pick(executables);
+
+        if (executable)
+            *executable = selectedExecutable;
+
+        if (!selectedExecutable.isEmpty())
+            return selectedExecutable;
+
+        const QString plugin =
+            pick(plugins);
+
+        if (!plugin.isEmpty())
+            return plugin;
+
+        return pick(services);
+    }
+
+
+    static void cmakeDesktopMetadata(
+        const QStringList &paths,
+        const QString &projectKey,
+        QString &desktopFile,
+        QString &name,
+        QString &description)
+    {
+        int bestScore = -1;
+
+        for (const QString &path : paths) {
+            if (!path.endsWith(
+                    QStringLiteral(".desktop"),
+                    Qt::CaseInsensitive) ||
+                !QFileInfo(path).isFile()) {
+                continue;
+            }
+
+            QSettings desktop(
+                path,
+                QSettings::IniFormat);
+
+            desktop.beginGroup(
+                QStringLiteral("Desktop Entry"));
+
+            const QString type =
+                desktop.value(
+                    QStringLiteral("Type"))
+                    .toString()
+                    .trimmed();
+
+            const bool hidden =
+                desktop.value(
+                    QStringLiteral("Hidden"),
+                    false)
+                    .toBool();
+
+            const QString flatpakId =
+                desktop.value(
+                    QStringLiteral("X-Flatpak"))
+                    .toString()
+                    .trimmed();
+
+            const QString candidateName =
+                desktop.value(
+                    QStringLiteral("Name"))
+                    .toString()
+                    .trimmed();
+
+            const QString comment =
+                desktop.value(
+                    QStringLiteral("Comment"))
+                    .toString()
+                    .trimmed();
+
+            desktop.endGroup();
+
+            if (hidden ||
+                !flatpakId.isEmpty() ||
+                (!type.isEmpty() &&
+                 type != QStringLiteral("Application") &&
+                 type != QStringLiteral("Service"))) {
+                continue;
+            }
+
+            int score = 0;
+
+            if (type == QStringLiteral("Application"))
+                score += 50;
+
+            if (normalizeApplicationName(
+                    path)
+                    .contains(projectKey)) {
+                score += 40;
+            }
+
+            if (normalizeApplicationName(
+                    candidateName)
+                    .contains(projectKey)) {
+                score += 40;
+            }
+
+            if (!candidateName.isEmpty())
+                score += 10;
+
+            if (score <= bestScore)
+                continue;
+
+            bestScore = score;
+            desktopFile = path;
+            name = candidateName;
+            description = comment;
+        }
+    }
+
+
+    static ManualRemovalPlan cmakeManifestRemovalPlan(
+        const ApplicationInfo &app)
+    {
+        ManualRemovalPlan plan;
+
+        if (!isCMakeManifestSourceBuild(app)) {
+            plan.resolution =
+                QStringLiteral(
+                    "not a CMake manifest source build");
+            return plan;
+        }
+
+        const QString primary =
+            QDir::cleanPath(
+                app.installLocation.trimmed());
+
+        if (primary.isEmpty() ||
+            app.files.isEmpty()) {
+            plan.resolution =
+                QStringLiteral(
+                    "CMake manifest application identity is incomplete");
+            return plan;
+        }
+
+        for (const QString &rawPath :
+             app.files) {
+            const QString path =
+                QDir::cleanPath(
+                    rawPath.trimmed());
+
+            const QFileInfo info(path);
+
+            if (path.isEmpty() ||
+                !QDir::isAbsolutePath(path) ||
+                (!info.exists() &&
+                 !info.isSymLink()) ||
+                info.isDir() ||
+                !safeCMakeManifestRemovalTargetStatic(
+                    path) ||
+                !rpmOwnerForPath(path).isEmpty()) {
+                plan.paths.clear();
+                plan.primary.clear();
+                plan.resolution =
+                    QStringLiteral(
+                        "CMake manifest contains an unverified or unsafe installed path");
+                return plan;
+            }
+
+            if (!plan.paths.contains(path))
+                plan.paths.append(path);
+        }
+
+        if (!plan.paths.contains(primary)) {
+            plan.paths.clear();
+            plan.resolution =
+                QStringLiteral(
+                    "CMake manifest no longer verifies the primary runtime component");
+            return plan;
+        }
+
+        plan.primary = primary;
+        plan.resolution =
+            QStringLiteral(
+                "%1 verified CMake manifest %2")
+                .arg(plan.paths.size())
+                .arg(wordForCount(
+                    plan.paths.size(),
+                    QStringLiteral("path"),
+                    QStringLiteral("paths")));
+
+        return plan;
+    }
+
+
+    static bool sameInstalledApplication(
+        const ApplicationInfo &left,
+        const ApplicationInfo &right)
+    {
+        const QString leftDesktop =
+            left.desktopFile.trimmed();
+
+        const QString rightDesktop =
+            right.desktopFile.trimmed();
+
+        if (!leftDesktop.isEmpty() &&
+            !rightDesktop.isEmpty() &&
+            QDir::cleanPath(leftDesktop) ==
+                QDir::cleanPath(rightDesktop)) {
+            return true;
+        }
+
+        const QString leftExecutable =
+            left.executable.trimmed();
+
+        const QString rightExecutable =
+            right.executable.trimmed();
+
+        if (!leftExecutable.isEmpty() &&
+            !rightExecutable.isEmpty() &&
+            QDir::cleanPath(leftExecutable) ==
+                QDir::cleanPath(rightExecutable)) {
+            return true;
+        }
+
+        return false;
+    }
+
+
+    static QList<ApplicationInfo>
+    detectCMakeManifestApplications(
+        const QList<ApplicationInfo> &existing)
+    {
+        QList<ApplicationInfo> result;
+
+        for (const QString &manifestPath :
+             findCMakeInstallManifests()) {
+            QString projectId =
+                normalizedCMakeProjectId(
+                    cmakeCacheValue(
+                        manifestPath,
+                        QStringLiteral(
+                            "CMAKE_PROJECT_NAME")));
+
+            if (projectId.size() < 3)
+                continue;
+
+            const QString projectKey =
+                normalizeApplicationName(
+                    projectId);
+
+            if (projectKey.size() < 3)
+                continue;
+
+            const QStringList paths =
+                readCMakeInstallManifest(
+                    manifestPath);
+
+            if (paths.isEmpty())
+                continue;
+
+            bool identitySeen = false;
+            bool packageOwned = false;
+            QStringList locations;
+            quint64 totalSize = 0;
+
+            for (const QString &path : paths) {
+                if (normalizeApplicationName(
+                        path)
+                        .contains(projectKey)) {
+                    identitySeen = true;
+                }
+
+                const QFileInfo info(path);
+
+                if (info.exists() ||
+                    info.isSymLink()) {
+                    const QString parent =
+                        QDir::cleanPath(
+                            info.absolutePath());
+
+                    if (!locations.contains(parent))
+                        locations.append(parent);
+
+                    if (info.isFile() &&
+                        !info.isSymLink()) {
+                        totalSize +=
+                            static_cast<quint64>(
+                                qMax<qint64>(
+                                    0,
+                                    info.size()));
+                    }
+
+                    if (!rpmOwnerForPath(
+                            path).isEmpty()) {
+                        packageOwned = true;
+                        break;
+                    }
+                }
+            }
+
+            if (!identitySeen ||
+                packageOwned) {
+                continue;
+            }
+
+            QString executable;
+
+            const QString primary =
+                relatedCMakeRuntimeAnchor(
+                    paths,
+                    projectKey,
+                    &executable);
+
+            if (primary.isEmpty())
+                continue;
+
+            ApplicationInfo app;
+            app.id = projectId;
+            app.name =
+                cmakeProjectDisplayName(
+                    projectId);
+
+            QString desktopName;
+            QString desktopDescription;
+
+            cmakeDesktopMetadata(
+                paths,
+                projectKey,
+                app.desktopFile,
+                desktopName,
+                desktopDescription);
+
+            if (!desktopName.isEmpty())
+                app.name = desktopName;
+
+            if (!desktopDescription.isEmpty())
+                app.description =
+                    desktopDescription;
+
+            app.version =
+                cmakeCacheValue(
+                    manifestPath,
+                    QStringLiteral(
+                        "CMAKE_PROJECT_VERSION"));
+
+            app.executable = executable;
+            app.installLocation = primary;
+            app.installLocations = locations;
+            app.files = paths;
+            app.packageManager =
+                QStringLiteral(
+                    "Source Build (CMake)");
+            app.source =
+                QStringLiteral(
+                    "CMake install_manifest.txt");
+            app.type =
+                ApplicationType::SourceBuild;
+            app.risk =
+                RiskLevel::Unknown;
+            app.installed = true;
+            app.userInstalled = true;
+            app.systemComponent = false;
+            app.protectedComponent = false;
+
+            if (totalSize > 0)
+                app.installedSize =
+                    manualSizeText(totalSize);
+
+            const QFileInfo manifestInfo(
+                manifestPath);
+
+            QDateTime installTime =
+                manifestInfo.lastModified();
+
+            if (!installTime.isValid())
+                installTime =
+                    manifestInfo.birthTime();
+
+            if (installTime.isValid()) {
+                app.installDate =
+                    installTime.date()
+                        .toString(Qt::ISODate);
+                app.installDateEstimated = true;
+            }
+
+            app.removable =
+                cmakeManifestRemovalPlan(
+                    app)
+                    .resolved();
+
+            bool packageManagedMatch = false;
+            bool duplicate = false;
+
+            for (const ApplicationInfo &known :
+                 existing) {
+                if (!sameInstalledApplication(
+                        known,
+                        app)) {
+                    continue;
+                }
+
+                if (known.type ==
+                        ApplicationType::RPM ||
+                    known.type ==
+                        ApplicationType::Flatpak) {
+                    packageManagedMatch = true;
+                    break;
+                }
+            }
+
+            if (packageManagedMatch)
+                continue;
+
+            for (const ApplicationInfo &known :
+                 result) {
+                if (sameInstalledApplication(
+                        known,
+                        app) ||
+                    (known.id.compare(
+                         app.id,
+                         Qt::CaseInsensitive) == 0 &&
+                     QDir::cleanPath(
+                         known.installLocation) ==
+                         QDir::cleanPath(
+                             app.installLocation))) {
+                    duplicate = true;
+                    break;
+                }
+            }
+
+            if (!duplicate)
+                result.append(app);
+        }
+
+        return result;
+    }
+
+
+    static void mergeCMakeManifestApplications(
+        QList<ApplicationInfo> &applications)
+    {
+        const QList<ApplicationInfo> detected =
+            detectCMakeManifestApplications(
+                applications);
+
+        for (const ApplicationInfo &sourceBuild :
+             detected) {
+            int replaceIndex = -1;
+            bool matched = false;
+
+            for (int i = 0;
+                 i < applications.size();
+                 ++i) {
+                const ApplicationInfo &existing =
+                    applications.at(i);
+
+                if (!sameInstalledApplication(
+                        existing,
+                        sourceBuild)) {
+                    continue;
+                }
+
+                matched = true;
+
+                if (existing.type ==
+                        ApplicationType::RPM ||
+                    existing.type ==
+                        ApplicationType::Flatpak ||
+                    (!sourceBuild.removable &&
+                     existing.removable)) {
+                    break;
+                }
+
+                replaceIndex = i;
+                break;
+            }
+
+            if (replaceIndex >= 0) {
+                applications[replaceIndex] =
+                    sourceBuild;
+                continue;
+            }
+
+            if (!matched)
+                applications.append(sourceBuild);
+        }
+    }
+
+
     static QList<ApplicationInfo> detectLinkedOptApplications(
         const QList<ApplicationInfo> &existing)
     {
@@ -13314,6 +14516,9 @@ void showFullApplicationList(
                         applications);
 
                     Window::collapseManualOptApplications(
+                        applications);
+
+                    Window::mergeCMakeManifestApplications(
                         applications);
 
                     Window::enrichVerifiedLocalMetadata(
@@ -14635,6 +15840,9 @@ void showFullApplicationList(
             return plan;
         }
 
+        if (isCMakeManifestSourceBuild(app))
+            return cmakeManifestRemovalPlan(app);
+
         appendManualRemovalCandidate(
             plan,
             app,
@@ -15387,8 +16595,14 @@ void showFullApplicationList(
 
             for (const QString &path : plan.paths) {
                 QFileInfo info(path);
+
+                const bool safePath =
+                    isCMakeManifestSourceBuild(app)
+                        ? safeCMakeManifestRemovalTargetStatic(path)
+                        : safeManualRemovalTargetStatic(path);
+
                 if ((!info.exists() && !info.isSymLink()) ||
-                    !safeManualRemovalTargetStatic(path)) {
+                    !safePath) {
                     reason = QStringLiteral(
                         "one or more verified application paths changed or disappeared");
                     return false;
@@ -16330,6 +17544,12 @@ void showFullApplicationList(
         results->setUpdatesEnabled(true);
         results->viewport()->update();
 
+        if (remaining == 0 &&
+            !activePendingCleanupKey.isEmpty()) {
+            removePendingCleanupProfileByKey(
+                activePendingCleanupKey);
+        }
+
         if (resultStatus) {
             if (remaining == 0 &&
                 groupedPostUninstallResults &&
@@ -16742,6 +17962,8 @@ void showFullApplicationList(
         }
 
         QStringList changedApplications;
+        QList<QPair<ApplicationInfo, QString>>
+            manualRecheckFailures;
         QApplication::setOverrideCursor(Qt::WaitCursor);
 
         for (const ApplicationInfo &app : selected) {
@@ -16752,12 +17974,35 @@ void showFullApplicationList(
                 changedApplications.append(
                     QStringLiteral("%1 — %2")
                         .arg(displayName, reason));
+
+                if (isManualLocal(app)) {
+                    manualRecheckFailures.append(
+                        qMakePair(
+                            app,
+                            reason));
+                }
             }
         }
 
         QApplication::restoreOverrideCursor();
 
         if (!changedApplications.isEmpty()) {
+            if (selected.size() == 1 &&
+                manualRecheckFailures.size() == 1) {
+                showAutomaticUninstallUnavailable(
+                    manualRecheckFailures.first().first,
+                    manualRecheckFailures.first().second);
+                refreshApplications();
+                return;
+            }
+
+            for (const auto &failure :
+                 manualRecheckFailures) {
+                savePendingCleanupProfile(
+                    failure.first,
+                    failure.second);
+            }
+
             totalSweepWarning(
                 this,
                 QStringLiteral("Application Recheck"),
@@ -16828,13 +18073,10 @@ void showFullApplicationList(
                         true);
 
                 if (!plan.resolved()) {
-                    totalSweepWarning(
-                        this,
-                        QStringLiteral("Application Recheck"),
+                    showAutomaticUninstallUnavailable(
+                        app,
                         QStringLiteral(
-                            "TotalSweep could not verify a safe removal location for %1. "
-                            "Nothing was removed.")
-                            .arg(displayName));
+                            "The application's removal location could not be verified safely."));
                     refreshApplications();
                     return;
                 }
@@ -16858,12 +18100,10 @@ void showFullApplicationList(
                         hasRestrictedParent = true;
 
                         if (!isSafePrivilegedPathOperationTarget(path)) {
-                            totalSweepWarning(
-                                this,
-                                QStringLiteral("Application Recheck"),
+                            showAutomaticUninstallUnavailable(
+                                app,
                                 QStringLiteral(
-                                    "TotalSweep refused a permission-restricted manual/local path for %1 because one of its parent directories is user-writable or otherwise unsafe for an administrator operation. Nothing was removed.\n\n%2")
-                                    .arg(displayName, path));
+                                    "A permission-restricted application path could not be verified as safe for administrator removal."));
                             refreshApplications();
                             return;
                         }
@@ -16871,13 +18111,10 @@ void showFullApplicationList(
                 }
 
                 if (hasWritableParent && hasRestrictedParent) {
-                    totalSweepWarning(
-                        this,
-                        QStringLiteral("Application Recheck"),
+                    showAutomaticUninstallUnavailable(
+                        app,
                         QStringLiteral(
-                            "TotalSweep found a mixed user-owned and administrator-owned manual/local removal plan for %1. "
-                            "For safety, mixed-privilege manual removal is not performed automatically. Nothing was removed.")
-                            .arg(displayName));
+                            "The verified removal plan contains both user-owned and administrator-owned locations, which TotalSweep does not remove automatically as one manual/local operation."));
                     refreshApplications();
                     return;
                 }
@@ -17298,12 +18535,20 @@ void showFullApplicationList(
             if (!manualRemovalPlanReady.at(i))
                 continue;
 
+            const ApplicationInfo &app =
+                selected.at(i);
+
             for (const QString &path :
                  manualRemovalPlans.at(i).paths) {
                 const QFileInfo info(path);
 
+                const bool safePath =
+                    isCMakeManifestSourceBuild(app)
+                        ? safeCMakeManifestRemovalTargetStatic(path)
+                        : safeManualRemovalTargetStatic(path);
+
                 if ((!info.exists() && !info.isSymLink()) ||
-                    !safeManualRemovalTargetStatic(path) ||
+                    !safePath ||
                     !rpmOwnerForPath(path).isEmpty()) {
                     changedManualTargets.append(path);
                 }
@@ -17650,6 +18895,14 @@ void showFullApplicationList(
                             appendHistoryObject(
                                 history);
 
+                            const QString pendingReason =
+                                QStringLiteral(
+                                    "Automatic removal was incomplete; TotalSweep preserved the recovery map in Quarantine.");
+
+                            savePendingCleanupProfile(
+                                app,
+                                pendingReason);
+
                             failures.append(
                                 QStringLiteral(
                                     "%1 — removal was incomplete; the recovery map was preserved in Quarantine")
@@ -17692,6 +18945,11 @@ void showFullApplicationList(
                         }
                     }
                     else {
+                        savePendingCleanupProfile(
+                            app,
+                            QStringLiteral(
+                                "The unified administrator removal did not complete."));
+
                         failures.append(
                             QStringLiteral(
                                 "%1 — the unified privileged removal did not complete")
@@ -17727,6 +18985,10 @@ void showFullApplicationList(
                     }
                 }
                 else {
+                    savePendingCleanupProfile(
+                        app,
+                        manualError);
+
                     failures.append(
                         QStringLiteral("%1 — %2")
                             .arg(displayName, manualError));
@@ -17744,6 +19006,12 @@ void showFullApplicationList(
 
         if (successful > 0)
             loadHistory();
+
+        for (const ApplicationInfo &removed :
+             successfulApps) {
+            removePendingCleanupProfileForApplication(
+                removed);
+        }
 
         refreshApplications();
 
@@ -18004,6 +19272,730 @@ void showFullApplicationList(
             raw.append(QFileInfo(app.desktopFile).completeBaseName());
 
         return sanitizeLeftoverSearchTerms(raw);
+    }
+
+
+    QString pendingCleanupKeyForApplication(
+        const ApplicationInfo &app) const
+    {
+        QStringList parts;
+
+        const QString id =
+            app.id.trimmed().toCaseFolded();
+        if (!id.isEmpty())
+            parts.append(QStringLiteral("id:") + id);
+
+        if (!app.desktopFile.trimmed().isEmpty()) {
+            const QString desktop =
+                QFileInfo(app.desktopFile)
+                    .completeBaseName()
+                    .trimmed()
+                    .toCaseFolded();
+
+            if (!desktop.isEmpty())
+                parts.append(QStringLiteral("desktop:") + desktop);
+        }
+
+        const QStringList execParts =
+            QProcess::splitCommand(
+                app.executable.trimmed());
+
+        for (const QString &part : execParts) {
+            if (part.startsWith(QLatin1Char('%')) ||
+                part.startsWith(QLatin1Char('-'))) {
+                continue;
+            }
+
+            const QString executable =
+                QFileInfo(part)
+                    .fileName()
+                    .trimmed()
+                    .toCaseFolded();
+
+            if (!executable.isEmpty()) {
+                parts.append(
+                    QStringLiteral("exec:") +
+                    executable);
+                break;
+            }
+        }
+
+        const QString name =
+            app.name.trimmed().toCaseFolded();
+
+        if (!name.isEmpty())
+            parts.append(QStringLiteral("name:") + name);
+
+        return parts.join(QLatin1Char('|'));
+    }
+
+
+    QStringList pendingCleanupSearchTermsForApplication(
+        const ApplicationInfo &app) const
+    {
+        QStringList raw =
+            leftoverSearchTermsForApplication(app);
+
+        QStringList strongIdentities{
+            normalizeApplicationName(app.id),
+            normalizeApplicationName(app.name),
+            normalizeApplicationName(
+                QFileInfo(app.desktopFile)
+                    .completeBaseName())
+        };
+
+        const QStringList execParts =
+            QProcess::splitCommand(
+                app.executable.trimmed());
+
+        for (const QString &part : execParts) {
+            if (part.startsWith(QLatin1Char('%')) ||
+                part.startsWith(QLatin1Char('-'))) {
+                continue;
+            }
+
+            strongIdentities.append(
+                normalizeApplicationName(
+                    QFileInfo(part).fileName()));
+            break;
+        }
+
+        static const QSet<QString> broadLocationNames = {
+            QStringLiteral("bin"),
+            QStringLiteral("sbin"),
+            QStringLiteral("lib"),
+            QStringLiteral("lib64"),
+            QStringLiteral("share"),
+            QStringLiteral("usr"),
+            QStringLiteral("local"),
+            QStringLiteral("opt"),
+            QStringLiteral("etc"),
+            QStringLiteral("var"),
+            QStringLiteral("cache"),
+            QStringLiteral("config"),
+            QStringLiteral("data"),
+            QStringLiteral("plugin"),
+            QStringLiteral("plugins")
+        };
+
+        auto appendRelatedLocationBase =
+            [&](const QString &location) {
+                const QString cleaned =
+                    QDir::cleanPath(
+                        location.trimmed());
+
+                if (cleaned.isEmpty() ||
+                    cleaned == QStringLiteral(".")) {
+                    return;
+                }
+
+                const QString base =
+                    QFileInfo(cleaned).fileName();
+
+                const QString normalizedBase =
+                    normalizeApplicationName(base);
+
+                if (normalizedBase.size() < 3 ||
+                    broadLocationNames.contains(
+                        normalizedBase.toCaseFolded())) {
+                    return;
+                }
+
+                for (const QString &identity :
+                     strongIdentities) {
+                    if (identity.size() < 3)
+                        continue;
+
+                    if (identity.contains(normalizedBase) ||
+                        normalizedBase.contains(identity)) {
+                        raw.append(base);
+                        return;
+                    }
+                }
+            };
+
+        appendRelatedLocationBase(
+            app.installLocation);
+
+        for (const QString &location :
+             app.installLocations) {
+            appendRelatedLocationBase(location);
+        }
+
+        return sanitizeLeftoverSearchTerms(raw);
+    }
+
+
+    int pendingCleanupIndexForKey(
+        const QString &key) const
+    {
+        if (key.trimmed().isEmpty())
+            return -1;
+
+        for (int i = 0;
+             i < pendingCleanupProfiles.size();
+             ++i) {
+            if (pendingCleanupProfiles.at(i).key == key)
+                return i;
+        }
+
+        return -1;
+    }
+
+
+    int pendingCleanupIndexForDisplayName(
+        const QString &name) const
+    {
+        const QString query =
+            name.trimmed();
+
+        if (query.isEmpty())
+            return -1;
+
+        for (int i = pendingCleanupProfiles.size() - 1;
+             i >= 0;
+             --i) {
+            const ApplicationInfo &app =
+                pendingCleanupProfiles.at(i).app;
+
+            const QString displayName =
+                app.name.trimmed().isEmpty()
+                    ? app.id.trimmed()
+                    : app.name.trimmed();
+
+            if (displayName.compare(
+                    query,
+                    Qt::CaseInsensitive) == 0) {
+                return i;
+            }
+        }
+
+        return -1;
+    }
+
+
+    bool writePendingCleanupProfiles()
+    {
+        QJsonArray array;
+
+        for (const PendingCleanupProfile &profile :
+             pendingCleanupProfiles) {
+            QJsonObject object;
+            object[QStringLiteral("key")] =
+                profile.key;
+            object[QStringLiteral("application")] =
+                applicationToJson(profile.app);
+            object[QStringLiteral("searchTerms")] =
+                stringListToJson(profile.searchTerms);
+            object[QStringLiteral("reason")] =
+                profile.reason;
+            object[QStringLiteral("createdUtc")] =
+                profile.createdUtc.toString(
+                    Qt::ISODateWithMs);
+            object[QStringLiteral("expiresUtc")] =
+                profile.expiresUtc.toString(
+                    Qt::ISODateWithMs);
+            array.append(object);
+        }
+
+        return writeJsonArrayAtomic(
+            pendingCleanupPath(),
+            array);
+    }
+
+
+    void loadPendingCleanupProfiles()
+    {
+        pendingCleanupProfiles.clear();
+
+        const QDateTime now =
+            QDateTime::currentDateTimeUtc();
+
+        bool changed = false;
+
+        for (const QJsonValue &value :
+             readJsonArray(
+                 pendingCleanupPath())) {
+            const QJsonObject object =
+                value.toObject();
+
+            PendingCleanupProfile profile;
+            profile.key =
+                object[
+                    QStringLiteral("key")]
+                    .toString()
+                    .trimmed();
+            profile.app =
+                applicationFromJson(
+                    object[
+                        QStringLiteral("application")]
+                        .toObject());
+            profile.searchTerms =
+                sanitizeLeftoverSearchTerms(
+                    jsonToStringList(
+                        object[
+                            QStringLiteral("searchTerms")]));
+            profile.reason =
+                object[
+                    QStringLiteral("reason")]
+                    .toString()
+                    .trimmed();
+            profile.createdUtc =
+                QDateTime::fromString(
+                    object[
+                        QStringLiteral("createdUtc")]
+                        .toString(),
+                    Qt::ISODateWithMs);
+            profile.expiresUtc =
+                QDateTime::fromString(
+                    object[
+                        QStringLiteral("expiresUtc")]
+                        .toString(),
+                    Qt::ISODateWithMs);
+
+            if (!profile.createdUtc.isValid())
+                profile.createdUtc = now;
+
+            if (!profile.expiresUtc.isValid())
+                profile.expiresUtc =
+                    profile.createdUtc.addDays(30);
+
+            if (profile.key.isEmpty())
+                profile.key =
+                    pendingCleanupKeyForApplication(
+                        profile.app);
+
+            if (profile.searchTerms.isEmpty())
+                profile.searchTerms =
+                    pendingCleanupSearchTermsForApplication(
+                        profile.app);
+
+            const QString displayName =
+                profile.app.name.trimmed().isEmpty()
+                    ? profile.app.id.trimmed()
+                    : profile.app.name.trimmed();
+
+            if (profile.key.isEmpty() ||
+                displayName.isEmpty() ||
+                profile.expiresUtc <= now) {
+                changed = true;
+                continue;
+            }
+
+            pendingCleanupProfiles.append(
+                profile);
+        }
+
+        if (changed)
+            writePendingCleanupProfiles();
+    }
+
+
+    void refreshPendingCleanupUi()
+    {
+        if (!pendingCleanupBox ||
+            !pendingCleanupLayout) {
+            return;
+        }
+
+        while (QLayoutItem *item =
+               pendingCleanupLayout->takeAt(0)) {
+            if (QWidget *widget =
+                    item->widget()) {
+                widget->hide();
+                widget->deleteLater();
+            }
+
+            delete item;
+        }
+
+        const QDateTime now =
+            QDateTime::currentDateTimeUtc();
+
+        bool expiredRemoved = false;
+
+        for (int i = pendingCleanupProfiles.size() - 1;
+             i >= 0;
+             --i) {
+            if (pendingCleanupProfiles.at(i).expiresUtc <= now) {
+                pendingCleanupProfiles.removeAt(i);
+                expiredRemoved = true;
+            }
+        }
+
+        if (expiredRemoved)
+            writePendingCleanupProfiles();
+
+        if (pendingCleanupProfiles.isEmpty()) {
+            pendingCleanupBox->setVisible(false);
+            return;
+        }
+
+        for (const PendingCleanupProfile &profile :
+             pendingCleanupProfiles) {
+            const QString displayName =
+                profile.app.name.trimmed().isEmpty()
+                    ? profile.app.id.trimmed()
+                    : profile.app.name.trimmed();
+
+            const qint64 secondsRemaining =
+                qMax<qint64>(
+                    0,
+                    now.secsTo(
+                        profile.expiresUtc));
+
+            const qint64 daysRemaining =
+                qMax<qint64>(
+                    1,
+                    (secondsRemaining + 86399) /
+                        86400);
+
+            auto *row =
+                new QWidget(
+                    pendingCleanupBox);
+
+            auto *rowLayout =
+                new QHBoxLayout(row);
+
+            rowLayout->setContentsMargins(
+                0,
+                0,
+                0,
+                0);
+
+            auto *label =
+                new QLabel(
+                    QStringLiteral(
+                        "%1 — %2 %3 remaining")
+                        .arg(displayName)
+                        .arg(daysRemaining)
+                        .arg(
+                            daysRemaining == 1
+                                ? QStringLiteral("day")
+                                : QStringLiteral("days")),
+                    row);
+
+            label->setSizePolicy(
+                QSizePolicy::Expanding,
+                QSizePolicy::Preferred);
+
+            auto *scanButton =
+                new QPushButton(
+                    QStringLiteral(
+                        "Scan Leftovers"),
+                    row);
+
+            auto *removeButton =
+                new QPushButton(
+                    QStringLiteral(
+                        "Remove Saved Info"),
+                    row);
+
+            rowLayout->addWidget(label, 1);
+            rowLayout->addWidget(scanButton);
+            rowLayout->addWidget(removeButton);
+
+            const QString key =
+                profile.key;
+
+            connect(
+                scanButton,
+                &QPushButton::clicked,
+                this,
+                [this, displayName]() {
+                    if (leftoversSearchDebounce)
+                        leftoversSearchDebounce->stop();
+
+                    if (leftoversSearch) {
+                        const QSignalBlocker blocker(
+                            leftoversSearch);
+                        leftoversSearch->setText(
+                            displayName);
+                    }
+
+                    scanLeftoversAsync(
+                        displayName);
+                });
+
+            connect(
+                removeButton,
+                &QPushButton::clicked,
+                this,
+                [this, key, displayName]() {
+                    if (totalSweepWarning(
+                            this,
+                            QStringLiteral(
+                                "Remove Saved Cleanup Information"),
+                            QStringLiteral(
+                                "Remove TotalSweep's saved cleanup information for %1?\n\n"
+                                "This only removes the saved cleanup profile. It does not delete application files.")
+                                .arg(displayName),
+                            QMessageBox::Yes |
+                                QMessageBox::No,
+                            QMessageBox::No)
+                        != QMessageBox::Yes) {
+                        return;
+                    }
+
+                    if (!removePendingCleanupProfileByKey(
+                            key)) {
+                        totalSweepWarning(
+                            this,
+                            QStringLiteral(
+                                "Saved Cleanup Information"),
+                            QStringLiteral(
+                                "TotalSweep could not update the saved cleanup information. Nothing was changed."));
+                    }
+                });
+
+            pendingCleanupLayout->addWidget(
+                row);
+        }
+
+        pendingCleanupBox->setVisible(true);
+    }
+
+
+    bool savePendingCleanupProfile(
+        const ApplicationInfo &app,
+        const QString &reason)
+    {
+        if (!isManualLocal(app))
+            return false;
+
+        PendingCleanupProfile profile;
+        profile.key =
+            pendingCleanupKeyForApplication(
+                app);
+
+        if (profile.key.isEmpty())
+            return false;
+
+        profile.app = app;
+        profile.searchTerms =
+            pendingCleanupSearchTermsForApplication(
+                app);
+        profile.reason =
+            reason.trimmed();
+        profile.createdUtc =
+            QDateTime::currentDateTimeUtc();
+        profile.expiresUtc =
+            profile.createdUtc.addDays(30);
+
+        const QList<PendingCleanupProfile> previous =
+            pendingCleanupProfiles;
+
+        const int existing =
+            pendingCleanupIndexForKey(
+                profile.key);
+
+        if (existing >= 0)
+            pendingCleanupProfiles[existing] = profile;
+        else
+            pendingCleanupProfiles.append(profile);
+
+        if (!writePendingCleanupProfiles()) {
+            pendingCleanupProfiles = previous;
+            refreshPendingCleanupUi();
+            return false;
+        }
+
+        refreshPendingCleanupUi();
+        return true;
+    }
+
+
+    bool removePendingCleanupProfileByKey(
+        const QString &key)
+    {
+        const int index =
+            pendingCleanupIndexForKey(
+                key);
+
+        if (index < 0)
+            return true;
+
+        const QList<PendingCleanupProfile> previous =
+            pendingCleanupProfiles;
+
+        pendingCleanupProfiles.removeAt(
+            index);
+
+        if (!writePendingCleanupProfiles()) {
+            pendingCleanupProfiles = previous;
+            refreshPendingCleanupUi();
+            return false;
+        }
+
+        if (activePendingCleanupKey == key)
+            activePendingCleanupKey.clear();
+
+        refreshPendingCleanupUi();
+        return true;
+    }
+
+
+    void removePendingCleanupProfileForApplication(
+        const ApplicationInfo &app)
+    {
+        removePendingCleanupProfileByKey(
+            pendingCleanupKeyForApplication(
+                app));
+    }
+
+
+    QString pendingCleanupReasonText(
+        QString reason) const
+    {
+        reason = reason.trimmed();
+
+        if (reason.isEmpty()) {
+            return QStringLiteral(
+                "TotalSweep could not verify a safe automatic removal method for this application.");
+        }
+
+        if (!reason.isEmpty() &&
+            reason.front().isLower()) {
+            reason[0] =
+                reason.front().toUpper();
+        }
+
+        if (!reason.endsWith(QLatin1Char('.')) &&
+            !reason.endsWith(QLatin1Char('!')) &&
+            !reason.endsWith(QLatin1Char('?'))) {
+            reason.append(QLatin1Char('.'));
+        }
+
+        return reason;
+    }
+
+
+    void showAutomaticUninstallUnavailable(
+        const ApplicationInfo &app,
+        const QString &reason)
+    {
+        const QString displayName =
+            app.name.trimmed().isEmpty()
+                ? app.id.trimmed()
+                : app.name.trimmed();
+
+        const bool cleanupSaved =
+            savePendingCleanupProfile(
+                app,
+                reason);
+
+        QString message =
+            QStringLiteral(
+                "TotalSweep can't safely uninstall %1 automatically.\n\n"
+                "Reason: %2\n\n"
+                "Nothing has been changed.\n\n")
+                .arg(
+                    displayName,
+                    pendingCleanupReasonText(
+                        reason));
+
+        if (cleanupSaved) {
+            message +=
+                QStringLiteral(
+                    "TotalSweep saved this application's cleanup information for 30 days.\n\n");
+        }
+        else {
+            message +=
+                QStringLiteral(
+                    "TotalSweep could not save this application's cleanup information for later use.\n\n");
+        }
+
+        message +=
+            QStringLiteral(
+                "Use the application's own uninstaller or removal instructions first. "
+                "When the uninstall is finished, return to TotalSweep, open Leftovers, and search for exactly:\n\n"
+                "%1")
+                .arg(displayName);
+
+        totalSweepWarning(
+            this,
+            QStringLiteral(
+                "Automatic Uninstall Not Available"),
+            message);
+    }
+
+
+    QStringList activePendingCleanupKnownPaths() const
+    {
+        const int index =
+            pendingCleanupIndexForKey(
+                activePendingCleanupKey);
+
+        if (index < 0)
+            return {};
+
+        const ApplicationInfo &app =
+            pendingCleanupProfiles.at(index).app;
+
+        QStringList candidates =
+            app.files;
+
+        candidates.append(
+            app.installLocation);
+        candidates.append(
+            app.installLocations);
+
+        if (!app.desktopFile.trimmed().isEmpty())
+            candidates.append(app.desktopFile);
+
+        const QStringList execParts =
+            QProcess::splitCommand(
+                app.executable.trimmed());
+
+        for (const QString &part : execParts) {
+            if (!QDir::isAbsolutePath(part))
+                continue;
+
+            candidates.append(part);
+            break;
+        }
+
+        QStringList paths;
+        QSet<QString> seen;
+
+        for (const QString &candidate :
+             candidates) {
+            const QString path =
+                QDir::cleanPath(
+                    candidate.trimmed());
+
+            if (path.isEmpty() ||
+                path == QStringLiteral(".") ||
+                seen.contains(path) ||
+                isTotalSweepManagedPath(path) ||
+                isPackageManagerMetadataPath(path)) {
+                continue;
+            }
+
+            const QFileInfo info(path);
+
+            if (!info.exists() &&
+                !info.isSymLink()) {
+                continue;
+            }
+
+            const bool safePath =
+                isCMakeManifestSourceBuild(app)
+                    ? safeCMakeManifestRemovalTargetStatic(
+                        path)
+                    : safeManualRemovalTargetStatic(
+                        path);
+
+            if (!safePath ||
+                !rpmOwnerForPath(path).isEmpty()) {
+                continue;
+            }
+
+            seen.insert(path);
+            paths.append(path);
+        }
+
+        return paths;
     }
 
 
@@ -18602,13 +20594,84 @@ void showFullApplicationList(
         leftoverScanRunning = true;
         currentApp = query;
 
+        QStringList effectiveSearchTerms =
+            searchTerms;
+
+        if (!fromPostUninstallTransition &&
+            effectiveSearchTerms.isEmpty()) {
+            const int pendingIndex =
+                pendingCleanupIndexForDisplayName(
+                    query);
+
+            if (pendingIndex >= 0) {
+                const QString pendingDisplayName =
+                    pendingCleanupProfiles
+                        .at(pendingIndex)
+                        .app.name.trimmed().isEmpty()
+                        ? pendingCleanupProfiles
+                            .at(pendingIndex)
+                            .app.id.trimmed()
+                        : pendingCleanupProfiles
+                            .at(pendingIndex)
+                            .app.name.trimmed();
+
+                if (totalSweepWarning(
+                        this,
+                        QStringLiteral(
+                            "Pending Cleanup"),
+                        QStringLiteral(
+                            "Only continue after %1 has been uninstalled using its own removal method. "
+                            "TotalSweep will use the saved application information to look for remaining files.\n\n"
+                            "Has the external uninstall finished?")
+                            .arg(pendingDisplayName),
+                        QMessageBox::Yes |
+                            QMessageBox::No,
+                        QMessageBox::No)
+                    != QMessageBox::Yes) {
+                    leftoverScanRunning = false;
+                    activePendingCleanupKey.clear();
+
+                    if (resultStatus) {
+                        resultStatus->setText(
+                            QStringLiteral(
+                                "Pending cleanup scan cancelled. Uninstall the application using its own removal method first."));
+                    }
+
+                    return;
+                }
+
+                activePendingCleanupKey =
+                    pendingCleanupProfiles
+                        .at(pendingIndex)
+                        .key;
+                effectiveSearchTerms =
+                    pendingCleanupProfiles
+                        .at(pendingIndex)
+                        .searchTerms;
+            }
+            else {
+                activePendingCleanupKey.clear();
+            }
+        }
+        else {
+            activePendingCleanupKey.clear();
+        }
+
         activeLeftoverSearchTerms =
             sanitizeLeftoverSearchTerms(
-                searchTerms.isEmpty()
+                effectiveSearchTerms.isEmpty()
                     ? QStringList{query}
-                    : searchTerms);
+                    : effectiveSearchTerms);
 
-        if (activeLeftoverSearchTerms.isEmpty()) {
+        const QStringList pendingKnownPaths =
+            activePendingCleanupKnownPaths();
+
+        const bool pendingPathsOnlyScan =
+            activeLeftoverSearchTerms.isEmpty() &&
+            !pendingKnownPaths.isEmpty();
+
+        if (activeLeftoverSearchTerms.isEmpty() &&
+            !pendingPathsOnlyScan) {
             leftoverScanRunning = false;
 
             scanProgress->setVisible(false);
@@ -18722,6 +20785,22 @@ void showFullApplicationList(
                 .arg(query));
 
         setCurrentPage(1);
+
+        if (pendingPathsOnlyScan) {
+            systemScanResults =
+                pendingKnownPaths;
+            completedScanProcesses = 2;
+
+            QTimer::singleShot(
+                0,
+                this,
+                [this, generation]() {
+                    finishLeftoverScan(
+                        generation);
+                });
+
+            return;
+        }
 
         QProcess *process =
             new QProcess(this);
@@ -19062,9 +21141,12 @@ void showFullApplicationList(
         QMap<QString, QVector<Hit>> groups;
         QSet<QString> seen;
 
-        const QStringList all =
+        QStringList all =
             homeScanResults +
             systemScanResults;
+
+        all +=
+            activePendingCleanupKnownPaths();
 
         hits.clear();
         hits.reserve(all.size());
@@ -19356,6 +21438,12 @@ void showFullApplicationList(
 
         postUninstallLeftoverScan = false;
         postUninstallLeftoverDisplayName.clear();
+
+        if (hits.isEmpty() &&
+            !activePendingCleanupKey.isEmpty()) {
+            removePendingCleanupProfileByKey(
+                activePendingCleanupKey);
+        }
 
         scanProgress->setVisible(false);
         setSearchControlsForLeftoverScan(false);
@@ -21676,7 +23764,7 @@ int main(
         "TotalSweep Uninstaller");
 
     app.setApplicationVersion(
-        "8.10.1");
+        "8.10.2");
 
     Window window;
 

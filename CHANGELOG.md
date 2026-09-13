@@ -2,6 +2,12 @@
 
 All notable public changes to TotalSweep Uninstaller will be documented in this file.
 
+## [8.10.2] - 2026-09-12
+- added CMake source-build detection for manually installed apps
+- added Fit Columns to Window while keeping Reset Table Layout
+- added Pending Cleanup for apps that need to be uninstalled outside TotalSweep, keeping their cleanup details available in Leftovers for up to 30 days
+- cleaned up the Settings window title and added the TotalSweep version to Settings
+
 ## [8.10.1] - 2026-09-05
 
 **Unified Uninstall**
