@@ -7300,6 +7300,13 @@ private:
                 "Risk"
             });
 
+        if (QTreeWidgetItem *headerItem = results->headerItem()) {
+            for (int column = 0; column < 6; ++column)
+                headerItem->setTextAlignment(
+                    column,
+                    Qt::AlignLeft | Qt::AlignVCenter);
+        }
+
         results->setAlternatingRowColors(true);
         results->setRootIsDecorated(true);
 
@@ -7338,11 +7345,11 @@ private:
         }
 
         results->setColumnWidth(0, 260);
-        results->setColumnWidth(1, 520);
-        results->setColumnWidth(2, 105);
-        results->setColumnWidth(3, 100);
-        results->setColumnWidth(4, 165);
-        results->setColumnWidth(5, 150);
+        results->setColumnWidth(1, 560);
+        results->setColumnWidth(2, 100);
+        results->setColumnWidth(3, 90);
+        results->setColumnWidth(4, 160);
+        results->setColumnWidth(5, 130);
 
         restoreHeader();
 
@@ -7924,6 +7931,13 @@ private:
                 "Restore Status"
             });
 
+        if (QTreeWidgetItem *headerItem = historyTree->headerItem()) {
+            for (int column = 0; column < 6; ++column)
+                headerItem->setTextAlignment(
+                    column,
+                    Qt::AlignLeft | Qt::AlignVCenter);
+        }
+
         historyTree->setEmptyMessage(
             QStringLiteral(
                 "Quarantine is empty."));
@@ -7939,11 +7953,11 @@ private:
         }
 
         historyTree->setColumnWidth(0, 280);
-        historyTree->setColumnWidth(1, 140);
-        historyTree->setColumnWidth(2, 420);
-        historyTree->setColumnWidth(3, 100);
-        historyTree->setColumnWidth(4, 170);
-        historyTree->setColumnWidth(5, 260);
+        historyTree->setColumnWidth(1, 130);
+        historyTree->setColumnWidth(2, 435);
+        historyTree->setColumnWidth(3, 90);
+        historyTree->setColumnWidth(4, 160);
+        historyTree->setColumnWidth(5, 275);
         historyTree->setSelectionMode(QAbstractItemView::NoSelection);
         historyTree->setSelectionBehavior(QAbstractItemView::SelectRows);
         historyTree->setMouseTracking(true);
@@ -8412,7 +8426,7 @@ private:
     {
         fitTreeColumnsToViewport(
             results,
-            {260, 520, 105, 100, 165, 150});
+            {260, 560, 100, 90, 160, 130});
     }
 
 
@@ -8420,7 +8434,7 @@ private:
     {
         fitTreeColumnsToViewport(
             historyTree,
-            {280, 140, 420, 100, 170, 260});
+            {280, 130, 435, 90, 160, 275});
     }
 
 
@@ -23764,7 +23778,7 @@ int main(
         "TotalSweep Uninstaller");
 
     app.setApplicationVersion(
-        "8.10.2");
+        "8.10.3");
 
     Window window;
 

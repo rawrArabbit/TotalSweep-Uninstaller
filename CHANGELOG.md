@@ -2,6 +2,10 @@
 
 All notable public changes to TotalSweep Uninstaller will be documented in this file.
 
+## [8.10.3] - 2026-09-28
+- fixed Leftovers and Quarantine column header alignment
+- adjusted Leftovers and Quarantine column proportions for improved table layout
+
 ## [8.10.2] - 2026-09-12
 - added CMake source-build detection for manually installed apps
 - added Fit Columns to Window while keeping Reset Table Layout
